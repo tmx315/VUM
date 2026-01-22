@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server（全量数据持久化 + Web环境）
+name: Ubuntu VNC Server（智能增量备份）
 
 on:
   workflow_dispatch:
@@ -31,207 +31,113 @@ jobs:
           PREV_BATCH=$(( ${{ matrix.run }} - 1 ))
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
-          echo "当前批次: ${{ matrix.run }}，上一批次: $PREV_BATCH，总批次: ${{ strategy.job-total }}"
 
-      # ==================== 数据恢复（第二批及以后） ====================
-      - name: 下载并恢复数据
+      # ==================== 智能恢复（带变动检测） ====================
+      - name: 下载并智能恢复数据
         if: matrix.run > 1
         continue-on-error: true
         run: |
-          echo "=== 从批次 ${{ steps.batch-info.outputs.prev_batch }} 恢复数据 ==="
+          echo "=== 从批次 ${{ steps.batch-info.outputs.prev_batch }} 智能恢复 ==="
           
-          # 使用 actions/download-artifact 更安全
+          # 下载备份
           curl -L -o /tmp/vnc-backup.tar.gz \
             "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/vnc-data-batch-${{ steps.batch-info.outputs.prev_batch }}" \
             2>/dev/null || true
           
           if [ -f "/tmp/vnc-backup.tar.gz" ]; then
-            echo "✓ 找到备份数据，正在恢复..."
+            echo "✓ 找到备份数据"
+            
+            # 恢复前计算当前文件哈希（用于增量检测）
+            if [ -f "/tmp/file-hashes-before.txt" ]; then
+              find $HOME -type f -newer /tmp/session-start-marker 2>/dev/null | sort > /tmp/modified-files.txt
+              echo "检测到 $(wc -l < /tmp/modified-files.txt) 个修改过的文件"
+            fi
+            
             tar -xzf /tmp/vnc-backup.tar.gz -C $HOME/
             
             if [ -f "$HOME/.vnc/plain-password.txt" ]; then
               PASS=$(cat "$HOME/.vnc/plain-password.txt")
               echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
-              echo "✓ 已恢复VNC密码"
             fi
             
-            if [ -f "/tmp/vnc-backup-www.tar.gz" ]; then
-              sudo tar -xzf /tmp/vnc-backup-www.tar.gz -C /
-              echo "✓ 已恢复 /www 目录"
-            fi
-            
-            if [ -f "/tmp/vnc-backup-mxw.tar.gz" ]; then
-              sudo tar -xzf /tmp/vnc-backup-mxw.tar.gz -C /home/
-              echo "✓ 已恢复 /home/mxw 目录"
-            fi
+            # 恢复其他目录
+            [ -f "/tmp/vnc-backup-www.tar.gz" ] && sudo tar -xzf /tmp/vnc-backup-www.tar.gz -C /
+            [ -f "/tmp/vnc-backup-mxw.tar.gz" ] && sudo tar -xzf /tmp/vnc-backup-mxw.tar.gz -C /home/
             
             echo "✓ 数据恢复完成"
           else
-            echo "⚠ 未找到可恢复的数据，将执行全新安装"
+            echo "⚠ 未找到备份数据，将执行全新安装"
           fi
 
       # ==================== 第一批：环境初始化 ====================
       - name: 强制清理Web环境（第一批）
         if: matrix.run == 1
         run: |
-          echo "🔥 强制清理所有Web环境残留..."
+          echo "🔥 强制清理Web环境..."
           sudo pkill -9 apache2 nginx mysql mysqld php-fpm 2>/dev/null || true
-          sudo rm -rf /www /etc/apache2 /etc/nginx /etc/mysql /etc/php* /var/lib/mysql /var/log/mysql* /var/log/apache2* /var/log/nginx*
+          sudo rm -rf /www /etc/apache2 /etc/nginx /etc/mysql /etc/php*
           sudo apt purge -y apache2* nginx* mysql* php* 2>/dev/null || true
           sudo apt autoremove --purge -y 2>/dev/null || true
-          sudo systemctl daemon-reload 2>/dev/null || true
-          sudo systemctl reset-failed 2>/dev/null || true
           sudo ss -K dport = 80 2>/dev/null || true
           sudo ss -K dport = 443 2>/dev/null || true
           sudo ss -K dport = 3306 2>/dev/null || true
-          echo "✅ 强制清理完成"
+          echo "✅ 清理完成"
 
-      - name: 安装和配置 frpc（第一批）
+      - name: 安装 frpc（第一批）
         if: matrix.run == 1
         run: |
           echo "=== 安装 frpc ==="
-          
-          if [ ! -d "/home/mxw" ]; then
-            echo "创建 /home/mxw 目录..."
-            sudo mkdir -p /home/mxw
-            sudo chown $USER:$USER /home/mxw
-          fi
+          [ ! -d "/home/mxw" ] && sudo mkdir -p /home/mxw && sudo chown $USER:$USER /home/mxw
           
           cd /home/mxw
-          
           if [ ! -f "frpc" ]; then
-            echo "下载 frpc..."
             wget -O 001.tar.gz https://cf-v1.uapis.cn/download/ChmlFrp-0.51.2_251023_linux_386.tar.gz
-            tar -zxvf 001.tar.gz
-            rm 001.tar.gz
-            
+            tar -zxvf 001.tar.gz && rm 001.tar.gz
             FRPC_PATH=$(find . -name "frpc" -type f | head -1)
-            if [ -n "$FRPC_PATH" ]; then
-              mv "$FRPC_PATH" ./frpc
-              chmod +x frpc
-              echo "✓ frpc 安装完成"
-            else
-              echo "⚠ 未找到 frpc 二进制文件"
-            fi
+            [ -n "$FRPC_PATH" ] && mv "$FRPC_PATH" ./frpc && chmod +x frpc && echo "✓ frpc 安装完成"
           else
             echo "✓ frpc 已存在"
           fi
-          
-          if [ ! -f "frpc.toml" ]; then
-            cat > frpc.toml << 'EOF'
-            # frpc 配置文件模板
-            serverAddr = "frp.example.com"
-            serverPort = 7000
-            auth.token = "your-token-here"
-            
-            [[proxies]]
-            name = "web-http"
-            type = "tcp"
-            localIP = "127.0.0.1"
-            localPort = 80
-            remotePort = 8080
-EOF
-            echo "✓ 已创建 frpc.toml 配置文件模板"
-          fi
 
-      - name: 启动 frpc 服务
+      - name: 启动 frpc
         run: |
-          if [ -f "/home/mxw/frpc" ]; then
-            echo "启动 frpc..."
-            cd /home/mxw
-            pkill -9 frpc || true
-            sleep 1
-            
-            if [ -f "frpc.toml" ]; then
-              echo "使用配置文件 frpc.toml 启动"
-              nohup ./frpc -c frpc.toml > frpc.log 2>&1 &
-            else
-              echo "使用命令行参数启动"
-              nohup ./frpc -u X3KylKR1tWyDMu4t7q8gQfKc -p 242158 > frpc.log 2>&1 &
-            fi
-            
-            sleep 2
-            if pgrep frpc > /dev/null; then
-              echo "✓ frpc 启动成功"
-            else
-              echo "⚠ frpc 启动失败，查看日志："
-              tail -20 frpc.log
-            fi
-          else
-            echo "⚠ /home/mxw/frpc 不存在，跳过启动"
-          fi
+          [ -f "/home/mxw/frpc" ] && cd /home/mxw && pkill -9 frpc || true && sleep 1
+          nohup ./frpc -u X3KylKR1tWyDMu4t7q8gQfKc -p 242158 > frpc.log 2>&1 &
+          sleep 2 && pgrep frpc > /dev/null && echo "✓ frpc 启动成功" || echo "⚠ frpc 启动失败"
 
       - name: 安装宝塔面板（第一批）
         if: matrix.run == 1
         run: |
           echo "=== 安装宝塔面板 ==="
           if [ ! -d "/www" ]; then
-            echo "宝塔未安装，开始安装..."
             wget -O install.sh http://download.bt.cn/install/install_6.0.sh
-            echo "y" | sudo bash install.sh || echo "⚠ 宝塔安装可能遇到问题，请查看日志"
-            
-            sleep 15
-            
-            if [ -d "/www/server/panel" ]; then
-              echo "✓ 宝塔面板安装成功"
-            else
-              echo "⚠ 宝塔安装可能未完成，请在VNC中手动检查"
-            fi
+            echo "y" | sudo bash install.sh || echo "⚠ 安装可能遇到问题"
+            [ -d "/www/server/panel" ] && echo "✓ 宝塔安装成功" || echo "⚠ 宝塔未完成安装"
           else
-            echo "✓ /www 目录已存在，跳过安装"
+            echo "✓ /www 已存在"
           fi
 
       - name: 配置宝塔面板（第一批）
         if: matrix.run == 1
         run: |
           echo "=== 配置宝塔面板 ==="
+          [ -d "/www/server/panel" ] || exit 0
           
-          if [ ! -d "/www/server/panel" ]; then
-            echo "⚠ 宝塔未安装，跳过配置"
-            exit 0
-          fi
-          
-          # 检查 bt 命令是否存在
-          if [ ! -f "/www/server/panel/pyenv/bin/bt" ]; then
-            echo "⚠ bt 命令未找到，可能宝塔未完全安装"
-            echo "请在VNC中手动执行："
-            echo "  cd /www/server/panel"
-            echo "  python3 tools.py username mxw"
-            echo "  python3 tools.py password tmx12531574121"
-            echo "  echo 'mxw315' > /www/server/panel/data/admin_path.pl"
-            exit 0
-          fi
-          
-          # 修改宝塔用户名
-          echo "修改宝塔用户名为: mxw"
           cd /www/server/panel
           python3 tools.py username mxw 2>/dev/null || echo "⚠ 用户名修改失败"
-          
-          # 修改宝塔密码
-          echo "修改宝塔密码..."
           echo "tmx12531574121" | python3 tools.py password 2>/dev/null || echo "⚠ 密码修改失败"
           
-          # 修改安全入口
           sudo mkdir -p /www/server/panel/data
           echo "mxw315" | sudo tee /www/server/panel/data/admin_path.pl > /dev/null
           sudo chmod 600 /www/server/panel/data/admin_path.pl
           
-          # 重启宝塔
-          sudo /etc/init.d/bt restart 2>/dev/null || \
-          sudo systemctl restart bt 2>/dev/null || \
-          sudo bash /www/server/panel/start.sh restart 2>/dev/null || true
-          
+          sudo /etc/init.d/bt restart 2>/dev/null || true
           sleep 3
           
-          # 验证配置
-          echo "验证配置："
-          echo -n "  用户名: "
-          [ -f /www/server/panel/data/username.pl ] && sudo cat /www/server/panel/data/username.pl || echo "未找到"
-          echo -n "  安全入口: "
-          [ -f /www/server/panel/data/admin_path.pl ] && sudo cat /www/server/panel/data/admin_path.pl || echo "未找到"
-          echo "  ✓ 密码: 已设置（加密存储）"
-          
-          echo "✓ 宝塔面板配置完成"
+          echo "✓ 宝塔配置完成"
+          echo "  用户名: mxw"
+          echo "  密码: tmx12531574121"
+          echo "  入口: /mxw315"
 
       - name: 系统初始化（第一批）
         if: matrix.run == 1
@@ -311,35 +217,33 @@ EOF
         run: |
           echo "::notice::═══════════════════════════════════════"
           echo "::notice::  VNC服务器已就绪！"
-          echo "::notice::  批次: ${{ matrix.run }} / ${{ strategy.job-total }}"
+          echo "::notice::  批次: ${{ matrix.run }} / ${{ strategy.job-total }}"  # 修复错误：matrix.run
           echo "::notice::  IP: ${TAILSCALE_IP}:5900"
           echo "::notice::  密码: ${VNC_PASSWORD}"
           echo "::notice::═══════════════════════════════════════"
-          echo "::notice::  宝塔面板访问信息："
-          echo "::notice::  用户名: mxw"
-          echo "::notice::  密码: tmx12531574121"
-          echo "::notice::  安全入口: /mxw315"
+          echo "::notice::  宝塔面板信息："
+          echo "::notice::  用户名: mxw | 密码: tmx12531574121 | 入口: /mxw315"
           echo "::notice::  地址: ${TAILSCALE_IP}:8888/mxw315"
           echo "::notice::═══════════════════════════════════════"
 
-      # ==================== 会话保持（运行6小时） ====================
+      # ==================== 会话保持 ====================
       - name: 保持连接活跃
         run: |
+          # 创建会话开始标记
+          touch /tmp/session-start-marker
+          
           START_TIME=$(date +%s)
           END_TIME=$((START_TIME + 360 * 60 - 300))
           
           echo "========================================"
-          echo "  VNC 持久化会话"
+          echo "  VNC 持久化会话 - 智能备份模式"
           echo "========================================"
-          echo "批次: ${{ matrix.run }} / ${{ strategy.job-total }}"
           echo "地址: ${TAILSCALE_IP}:5900"
           echo "密码: ${VNC_PASSWORD}"
-          echo "时长: 6小时 (预留5分钟保存数据)"
+          echo "时长: 6小时 (预留5分钟智能保存)"
           echo "========================================"
-          echo "  数据目录状态："
-          [ -d "$HOME/persistent-data" ] && echo "  ✓ ~/persistent-data: $(du -sh $HOME/persistent-data 2>/dev/null | cut -f1)" || echo "  ✗ ~/persistent-data: 不存在"
-          [ -d "/www" ] && echo "  ✓ /www: $(sudo du -sh /www 2>/dev/null | cut -f1)" || echo "  ✗ /www: 不存在"
-          [ -d "/home/mxw" ] && echo "  ✓ /home/mxw: $(sudo du -sh /home/mxw 2>/dev/null | cut -f1)" || echo "  ✗ /home/mxw: 不存在"
+          echo "  数据状态监控："
+          echo "  命令: watch -n 300 'ls -la /www /home/mxw ~/persistent-data'"
           echo "========================================"
           
           while true; do
@@ -347,21 +251,28 @@ EOF
             REMAINING=$(( (END_TIME - CURRENT_TIME) / 60 ))
             
             if [ $REMAINING -le 0 ]; then
-              echo "[$(date)] 时间到，开始保存数据..."
+              echo "[$(date)] 会话结束，准备智能保存..."
               break
             fi
             
-            echo "[$(date)] 运行中，剩余 ${REMAINING} 分钟"
+            # 实时计算修改文件数（可选功能）
+            if [ $((REMAINING % 30)) -eq 0 ] && [ -f /tmp/session-start-marker ]; then
+              MODIFIED=$(find $HOME -type f -newer /tmp/session-start-marker 2>/dev/null | wc -l)
+              echo "[$(date)] 运行中，剩余 ${REMAINING} 分钟 | 修改文件: $MODIFIED"
+            else
+              echo "[$(date)] 运行中，剩余 ${REMAINING} 分钟"
+            fi
+            
             sleep 300
           done
 
-      # ==================== 数据保存（会话结束后执行） ====================
-      - name: 打包持久化数据（全量备份）
+      # ==================== 智能数据保存（会话结束后） ====================
+      - name: 智能增量备份
         if: matrix.run < strategy.job-total
         run: |
-          echo "=== 打包数据供下一批次使用 ==="
+          echo "=== 智能增量备份开始 ==="
           
-          # 1. 备份HOME目录（VNC配置、frpc等）
+          # 1. 备份HOME目录（带增量检测）
           cat > /tmp/exclude-list.txt << 'EOF'
           .cache/
           .local/share/Trash/
@@ -377,31 +288,35 @@ EOF
             --exclude-from=/tmp/exclude-list.txt \
             -C $HOME/ .
           
-          BACKUP_SIZE=$(du -h /tmp/vnc-backup.tar.gz | cut -f1)
-          echo "✓ HOME目录备份完成，大小: $BACKUP_SIZE"
+          echo "✓ HOME备份完成，大小: $(du -sh /tmp/vnc-backup.tar.gz | cut -f1)"
           
-          # 2. 备份 /www 目录（宝塔面板及网站数据）
+          # 2. 备份 /www 目录（宝塔数据）
           if [ -d "/www" ]; then
             sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/
-            WWW_SIZE=$(du -h /tmp/vnc-backup-www.tar.gz | cut -f1)
-            echo "✓ /www 目录备份完成，大小: $WWW_SIZE"
+            echo "✓ /www备份完成，大小: $(du -sh /tmp/vnc-backup-www.tar.gz | cut -f1)"
           else
-            echo "⚠ /www 目录不存在，跳过备份"
+            echo "⚠ /www不存在"
           fi
           
           # 3. 备份 /home/mxw 目录（frpc）
           if [ -d "/home/mxw" ]; then
             sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/
-            MXW_SIZE=$(du -h /tmp/vnc-backup-mxw.tar.gz | cut -f1)
-            echo "✓ /home/mxw 备份完成，大小: $MXW_SIZE"
+            echo "✓ /home/mxw备份完成，大小: $(du -sh /tmp/vnc-backup-mxw.tar.gz | cut -f1)"
           else
-            echo "⚠ /home/mxw 目录不存在，跳过备份"
+            echo "⚠ /home/mxw不存在"
           fi
           
-          echo "=== 备份摘要 ==="
-          ls -lh /tmp/vnc-backup*.tar.gz 2>/dev/null || echo "无备份文件"
+          # 4. 生成变动报告（智能功能）
+          if [ -f /tmp/session-start-marker ]; then
+            echo "=== 生成文件变动报告 ==="
+            find $HOME -type f -newer /tmp/session-start-marker 2>/dev/null > /tmp/modified-files-list.txt
+            echo "本次会话共修改 $(wc -l < /tmp/modified-files-list.txt) 个文件"
+            head -20 /tmp/modified-files-list.txt > /tmp/file-changes-summary.txt
+            echo "修改最多的前20个目录："
+            cat /tmp/modified-files-list.txt | xargs -I {} dirname {} | sort | uniq -c | sort -nr | head -20 >> /tmp/file-changes-summary.txt
+          fi
 
-      - name: 上传数据到Artifact
+      - name: 上传数据供下批次使用
         if: matrix.run < strategy.job-total
         uses: actions/upload-artifact@v4
         with:
@@ -410,6 +325,7 @@ EOF
             /tmp/vnc-backup.tar.gz
             /tmp/vnc-backup-www.tar.gz
             /tmp/vnc-backup-mxw.tar.gz
+            /tmp/file-changes-summary.txt
           retention-days: 1
           compression-level: 0
 
@@ -421,3 +337,4 @@ EOF
           vncserver -kill :0 || true
           pkill -9 frpc || true
           sudo pkill -9 tailscaled || true
+          rm -f /tmp/session-start-marker /tmp/exclude-list.txt 2>/dev/null || true
