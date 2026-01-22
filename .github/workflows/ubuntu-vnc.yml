@@ -8,20 +8,15 @@ on:
         required: true
         default: '12'
         type: choice
-        options:
-          - '6'
-          - '12'
-          - '18'
-          - '24'
+        options: ['6', '12', '18', '24']
 
 jobs:
   ubuntu-vnc:
     strategy:
       matrix:
-        # 使用fromJson动态生成矩阵
         run: ${{ fromJson(github.event.inputs.total_hours == '6' && '[1]' || github.event.inputs.total_hours == '12' && '[1,2]' || github.event.inputs.total_hours == '18' && '[1,2,3]' || '[1,2,3,4]') }}
       fail-fast: false
-      max-parallel: 1  # 确保顺序执行
+      max-parallel: 1
 
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -30,39 +25,52 @@ jobs:
       - name: 检出代码仓库
         uses: actions/checkout@v4
 
+      # ==================== 核心修复：预计算批次号 ====================
+      - name: 计算批次信息
+        id: batch-info
+        run: |
+          # 计算上一批次号
+          PREV_BATCH=$(( ${{ matrix.run }} - 1 ))
+          echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
+          
+          # 计算总批次
+          TOTAL_BATCHES=${{ strategy.job-total }}
+          echo "total_batches=$TOTAL_BATCHES" >> "$GITHUB_OUTPUT"
+          
+          # 显示信息
+          echo "当前批次: ${{ matrix.run }}"
+          echo "上一批次: $PREV_BATCH"
+          echo "总批次: $TOTAL_BATCHES"
+          echo "需要恢复数据: $([ ${{ matrix.run }} -gt 1 ] && echo '是' || echo '否')"
+
       # ==================== 数据恢复步骤 ====================
       - name: 下载之前保存的数据
         uses: actions/download-artifact@v4
         if: matrix.run > 1
         continue-on-error: true
         with:
-          # 使用format()避免减法运算符歧义
-          name: ${{ format('vnc-data-batch-{0}', matrix.run - 1) }}
+          name: vnc-data-batch-${{ steps.batch-info.outputs.prev_batch }}  # 使用计算结果
           path: /tmp/vnc-data-restore
 
       - name: 恢复VNC配置和用户数据
         if: matrix.run > 1
         continue-on-error: true
         run: |
-          if [ -d "/tmp/vnc-data-restore" ] && [ -f "/tmp/vnc-data-restore/vnc-backup.tar.gz" ]; then
+          if [ -f "/tmp/vnc-data-restore/vnc-backup.tar.gz" ]; then
             echo "发现之前保存的数据，正在恢复..."
-            
-            # 恢复VNC配置
             tar -xzf /tmp/vnc-data-restore/vnc-backup.tar.gz -C $HOME/
             
-            # 恢复密码文件
             if [ -f "$HOME/.vnc/plain-password.txt" ]; then
               PASS=$(cat "$HOME/.vnc/plain-password.txt")
               echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
               echo "✓ 已恢复VNC密码"
             fi
             
-            # 验证数据目录
             if [ -d "$HOME/persistent-data" ]; then
-              echo "✓ 已恢复用户数据，共 $(find $HOME/persistent-data -type f | wc -l) 个文件"
+              echo "✓ 已恢复用户数据，共 $(find $HOME/persistent-data -type f 2>/dev/null | wc -l) 个文件"
             fi
           else
-            echo "未找到可恢复的数据，全新安装"
+            echo "未找到可恢复的数据"
           fi
 
       # ==================== 系统初始化 ====================
@@ -71,14 +79,10 @@ jobs:
         run: |
           echo "=== 首次运行，执行完整初始化 ==="
           sudo apt-get update && sudo apt-get upgrade -y
-          
-          # 阻止APT自动启动服务
           echo -e '#!/bin/sh\nexit 101' | sudo tee /usr/sbin/policy-rc.d >/dev/null
           sudo chmod +x /usr/sbin/policy-rc.d
-          
-          # 创建持久化数据目录
           mkdir -p $HOME/persistent-data
-          echo "重要数据请保存在 ~/persistent-data/ 目录"
+          echo "提示: 重要数据请保存在 ~/persistent-data/ 目录"
 
       - name: 安装桌面和VNC（第一批）
         if: matrix.run == 1
@@ -93,18 +97,13 @@ jobs:
         if: matrix.run == 1
         run: |
           mkdir -p ~/.vnc
-          
-          # 生成密码并双重保存
           PASS=$(tr -dc 'A-Za-z0-9!@#$%^&*' </dev/urandom | head -c 16)
           echo "$PASS" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
-          
-          # 明文保存供后续批次恢复
           echo "$PASS" > ~/.vnc/plain-password.txt
           chmod 600 ~/.vnc/plain-password.txt
           echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
           
-          # 配置xstartup
           cat > ~/.vnc/xstartup << 'EOF'
           #!/bin/bash
           unset SESSION_MANAGER
@@ -126,64 +125,49 @@ jobs:
       - name: 配置Tailscale
         id: tailscale
         run: |
-          # 安装Tailscale（如未安装）
           if ! command -v tailscale &> /dev/null; then
             curl -fsSL https://tailscale.com/install.sh | sh
           fi
-          
-          # 停止旧进程
           sudo systemctl stop tailscaled 2>/dev/null || true
           sudo pkill -9 tailscaled || true
           sleep 2
           
-          # 手动启动
           sudo mkdir -p /var/run /var/lib/tailscale
           nohup sudo tailscaled --state=/var/lib/tailscale/tailscaled.state \
             --socket=/var/run/tailscale/tailscaled.sock \
             >/tmp/tailscaled.log 2>&1 &
           sleep 5
           
-          # 连接网络
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-runner-${GITHUB_RUN_ID}-run${{ matrix.run }} \
             --accept-routes
           sleep 3
           
-          # 获取IP
           echo "TAILSCALE_IP=$(tailscale ip -4)" >> "$GITHUB_ENV"
 
       - name: 验证VNC连接
         run: |
-          echo "正在测试 VNC 连接..."
           nc -z -v "$TAILSCALE_IP" 5900
-          echo "✓ 连接成功"
+          echo "✓ VNC连接正常"
 
       # ==================== 数据保存步骤 ====================
       - name: 打包持久化数据
         id: backup
         run: |
-          echo "正在打包数据..."
           mkdir -p $HOME/persistent-data
-          
-          # 创建备份（包含配置和用户数据）
           tar -czf /tmp/vnc-backup.tar.gz \
             -C $HOME/ \
             .vnc/plain-password.txt \
             .vnc/passwd \
             .vnc/xstartup \
             persistent-data/
-          
-          # 显示备份内容
-          echo "备份内容："
-          tar -tzf /tmp/vnc-backup.tar.gz
-          echo "✓ 打包完成"
+          echo "✓ 数据打包完成"
 
       - name: 上传数据供下一批次使用
         uses: actions/upload-artifact@v4
         if: matrix.run < strategy.job-total
         with:
-          # 使用format()明确指定名称
-          name: ${{ format('vnc-data-batch-{0}', matrix.run) }}
+          name: vnc-data-batch-${{ matrix.run }}  # 直接使用matrix.run
           path: /tmp/vnc-backup.tar.gz
           retention-days: 1
           compression-level: 0
@@ -201,7 +185,7 @@ jobs:
       - name: 保持连接活跃
         run: |
           START_TIME=$(date +%s)
-          END_TIME=$((START_TIME + 360 * 60 - 300))  # 预留5分钟
+          END_TIME=$((START_TIME + 360 * 60 - 300))
           
           echo "========================================"
           echo "  VNC 持久化会话"
@@ -229,7 +213,5 @@ jobs:
       - name: 清理资源
         if: always()
         run: |
-          echo "正在清理..."
           vncserver -kill :0 || true
           sudo pkill -9 tailscaled || true
-          echo "清理完成"
