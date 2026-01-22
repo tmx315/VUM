@@ -20,6 +20,23 @@ jobs:
         shell: pwsh
         run: .github/workflows/scripts/win-create-user.ps1
 
+      - name: Set Administrator Password
+        shell: pwsh
+        # 安全警告：在工作流文件中硬编码密码存在安全隐患
+        # 建议在实际生产环境中使用 GitHub Secrets 存储密码
+        run: |
+          $username = "vum"
+          $newPassword = "tmx12531574121"
+          $securePassword = ConvertTo-SecureString $newPassword -AsPlainText -Force
+          
+          # 为 RDP 用户账户设置密码
+          Set-LocalUser -Name $username -Password $securePassword -ErrorAction Stop
+          
+          # 更新环境变量，确保最终显示步骤显示正确的密码
+          Add-Content -Path $env:GITHUB_ENV -Value "RDP_CREDS=$newPassword"
+          
+          Write-Host "用户 '$username' 的密码已更新"
+
       - name: Install Tailscale
         shell: pwsh
         run: .github/workflows/scripts/win-install-tailscale.ps1
