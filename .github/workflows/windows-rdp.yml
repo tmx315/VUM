@@ -22,20 +22,30 @@ jobs:
 
       - name: Set Administrator Password
         shell: pwsh
-        # 安全警告：在工作流文件中硬编码密码存在安全隐患
-        # 建议在实际生产环境中使用 GitHub Secrets 存储密码
         run: |
           $username = "vum"
-          $newPassword = "tmx12531574121"
+          $newPassword = "@Tmx12531574121"
           $securePassword = ConvertTo-SecureString $newPassword -AsPlainText -Force
           
-          # 为 RDP 用户账户设置密码
-          Set-LocalUser -Name $username -Password $securePassword -ErrorAction Stop
+          # 检查用户是否存在
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              Write-Error "用户 '$username' 不存在！请先确认用户创建成功。"
+              exit 1
+          }
           
-          # 更新环境变量，确保最终显示步骤显示正确的密码
-          Add-Content -Path $env:GITHUB_ENV -Value "RDP_CREDS=$newPassword"
-          
-          Write-Host "用户 '$username' 的密码已更新"
+          try {
+              # 设置密码
+              Set-LocalUser -Name $username -Password $securePassword -ErrorAction Stop
+              # 更新环境变量
+              Add-Content -Path $env:GITHUB_ENV -Value "RDP_CREDS=$newPassword"
+              Write-Host "✅ 用户 '$username' 的密码已成功设置为: $newPassword"
+          } catch [Microsoft.PowerShell.Commands.InvalidPasswordException] {
+              Write-Error "密码不符合复杂性要求。错误: $($_.Exception.Message)"
+              exit 1
+          } catch {
+              Write-Error "设置密码时出错: $($_.Exception.Message)"
+              exit 1
+          }
 
       - name: Install Tailscale
         shell: pwsh
