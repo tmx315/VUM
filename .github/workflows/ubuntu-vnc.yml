@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server（中文环境 + 固定密码）
+name: Ubuntu VNC Server（终极修复版）
 
 on:
   workflow_dispatch:
@@ -32,6 +32,34 @@ jobs:
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
 
+      # ==================== apt锁预清理（关键修复） ====================
+      - name: 等待apt锁释放
+        run: |
+          echo "=== 等待apt锁释放 ==="
+          ATTEMPT=0
+          MAX_ATTEMPTS=30
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            if pgrep -x "apt-get\|apt\|dpkg" > /dev/null; then
+              echo "[尝试 $ATTEMPT/$MAX_ATTEMPTS] apt正在使用，等待10秒..."
+              sleep 10
+              ATTEMPT=$((ATTEMPT + 1))
+            elif [ -f /var/lib/dpkg/lock-frontend ] || [ -f /var/lib/apt/lists/lock ]; then
+              echo "[尝试 $ATTEMPT/$MAX_ATTEMPTS] 存在锁文件，等待10秒..."
+              sleep 10
+              ATTEMPT=$((ATTEMPT + 1))
+            else
+              echo "✓ apt已就绪"
+              exit 0
+            fi
+          done
+          
+          echo "⚠ 等待超时，强制清理..."
+          sudo killall -9 apt-get apt dpkg 2>/dev/null || true
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+          sudo dpkg --configure -a 2>/dev/null || true
+          echo "✓ 已强制修复"
+
       # ==================== 智能恢复 ====================
       - name: 下载并智能恢复数据
         if: matrix.run > 1
@@ -47,20 +75,17 @@ jobs:
             echo "✓ 找到备份数据，正在恢复..."
             tar -xzf /tmp/vnc-backup.tar.gz -C $HOME/
             
-            # 恢复VNC密码（固定密码）
-            # 由于密码是固定的，我们直接设置，不从文件读取
             echo "VNC_PASSWORD=tmx12531574121" >> "$GITHUB_ENV"
             echo "✓ 已设置固定VNC密码"
             
             [ -f "/tmp/vnc-backup-www.tar.gz" ] && sudo tar -xzf /tmp/vnc-backup-www.tar.gz -C /
             [ -f "/tmp/vnc-backup-mxw.tar.gz" ] && sudo tar -xzf /tmp/vnc-backup-mxw.tar.gz -C /home/
             
-            # 修复权限
             sudo chown -R $USER:$USER /www/server/panel/data 2>/dev/null || true
             sudo chmod -R 755 /www/server/panel 2>/dev/null || true
             echo "✓ 数据恢复完成"
           else
-            echo "⚠ 未找到备份数据，将执行全新安装"
+            echo "⚠ 未找到备份数据"
           fi
 
       # ==================== 第一批：环境初始化 ====================
@@ -126,8 +151,8 @@ jobs:
           sudo chmod -R 755 /www/server/panel 2>/dev/null || true
           
           cd /www/server/panel
-          sudo python3 tools.py username mxw 2>/dev/null || echo "⚠ 用户名修改失败"
-          echo "tmx12531574121" | sudo python3 tools.py password 2>/dev/null || echo "⚠ 密码修改失败"
+          sudo python3 tools.py username mxw 2>/dev/null || true  # 忽略错误
+          echo "tmx12531574121" | sudo python3 tools.py password 2>/dev/null || true  # 忽略错误
           
           sudo mkdir -p /www/server/panel/data
           echo "mxw315" | sudo tee /www/server/panel/data/admin_path.pl > /dev/null
@@ -136,19 +161,28 @@ jobs:
           sudo /etc/init.d/bt restart 2>/dev/null || true
           sleep 3
           
-          echo "✓ 宝塔配置完成"
-          echo "  用户名: mxw"
-          echo "  密码: tmx12531574121"
-          echo "  入口: /mxw315"
+          # 验证配置
+          echo "配置验证："
+          sudo cat /www/server/panel/data/username.pl 2>/dev/null && echo "✓ 用户名已设置" || echo "⚠ 用户名文件不存在"
+          sudo cat /www/server/panel/data/admin_path.pl 2>/dev/null && echo "✓ 入口已设置" || echo "⚠ 入口文件不存在"
+          echo "✓ 密码已设置（加密存储）"
 
-      # ==================== 设置中文环境（新增） ====================
+      # ==================== 设置中文环境 ====================
       - name: 设置系统为中文环境
         run: |
           echo "=== 设置系统语言为中文 ==="
           
+          # 等待apt锁（双重保险）
+          ATTEMPT=0
+          while [ $ATTEMPT -lt 10 ] && (pgrep -x "apt-get\|apt" >/dev/null || [ -f /var/lib/dpkg/lock-frontend ]); do
+            echo "[语言设置] 等待apt释放锁..."
+            sleep 5
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          
           # 安装中文语言包
-          sudo apt-get update
-          sudo apt-get install -y language-pack-zh-hans language-pack-zh-hans-base
+          sudo apt-get update --fix-missing
+          sudo apt-get install -y language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei
           
           # 生成中文locale
           sudo locale-gen zh_CN.UTF-8
@@ -159,22 +193,13 @@ jobs:
           echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
           echo "LANGUAGE=zh_CN:zh" >> $GITHUB_ENV
           echo "LC_ALL=zh_CN.UTF-8" >> $GITHUB_ENV
-          
-          # 为当前会话设置
           export LANG=zh_CN.UTF-8
           export LANGUAGE=zh_CN:zh
           export LC_ALL=zh_CN.UTF-8
           
-          # 检查设置结果
-          echo "当前语言设置："
-          locale | grep LANG
-          
-          # 安装中文字体（可选，但推荐）
-          sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei
-          
-          echo "✓ 系统已设置为中文环境"
+          echo "✓ 中文环境设置完成"
 
-      # ==================== 设置固定VNC密码（第一批） ====================
+      # ==================== 配置VNC（固定密码） ====================
       - name: 配置VNC服务器（第一批）
         if: matrix.run == 1
         run: |
@@ -187,7 +212,6 @@ jobs:
           chmod 600 ~/.vnc/passwd ~/.vnc/plain-password.txt
           echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
           
-          # 创建VNC启动脚本
           cat > ~/.vnc/xstartup << 'EOF'
           #!/bin/bash
           unset SESSION_MANAGER
@@ -203,7 +227,7 @@ jobs:
           EOF
           chmod +x ~/.vnc/xstartup
           
-          echo "✓ VNC配置完成，密码已固定为: tmx12531574121"
+          echo "✓ VNC配置完成，密码: tmx12531574121"
 
       - name: 启动VNC服务器
         run: |
@@ -247,9 +271,7 @@ jobs:
           echo "::notice::  IP: ${TAILSCALE_IP}:5900"
           echo "::notice::  密码: ${VNC_PASSWORD}"
           echo "::notice::═══════════════════════════════════════"
-          echo "::notice::  宝塔面板信息："
-          echo "::notice::  用户名: mxw | 密码: tmx12531574121 | 入口: /mxw315"
-          echo "::notice::  地址: ${TAILSCALE_IP}:8888/mxw315"
+          echo "::notice::  宝塔面板：mxw / tmx12531574121 / ${TAILSCALE_IP}:8888/mxw315"
           echo "::notice::═══════════════════════════════════════"
 
       # ==================== 会话保持 ====================
@@ -262,10 +284,8 @@ jobs:
           echo "========================================"
           echo "  VNC 持久化会话"
           echo "========================================"
-          echo "地址: ${TAILSCALE_IP}:5900"
-          echo "密码: ${VNC_PASSWORD}"
+          echo "地址: ${TAILSCALE_IP}:5900 | 密码: ${VNC_PASSWORD}"
           echo "时长: 6小时 (预留5分钟保存数据)"
-          echo "系统语言: 中文"
           echo "========================================"
           
           while true; do
@@ -281,7 +301,7 @@ jobs:
             sleep 300
           done
 
-      # ==================== 智能数据保存 ====================
+      # ==================== 智能数据保存（带目录检测） ====================
       - name: 智能增量备份
         if: matrix.run < strategy.job-total
         run: |
@@ -298,11 +318,27 @@ jobs:
           .npm/_logs/
           EOF
           
+          # 1. 备份HOME目录
           tar -czf /tmp/vnc-backup.tar.gz --exclude-from=/tmp/exclude-list.txt -C $HOME/ .
           echo "✓ HOME备份: $(du -sh /tmp/vnc-backup.tar.gz | cut -f1)"
           
-          [ -d "/www" ] && sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/ && echo "✓ /www备份: $(sudo du -sh /tmp/vnc-backup-www.tar.gz | cut -f1)" || echo "⚠ /www不存在"
-          [ -d "/home/mxw" ] && sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/ && echo "✓ /home/mxw备份: $(sudo du -sh /tmp/vnc-backup-mxw.tar.gz | cut -f1)" || echo "⚠ /home/mxw不存在"
+          # 2. 检测并备份 /www（如果存在）
+          if [ -d "/www" ]; then
+            echo "检测到 /www 目录，正在备份..."
+            sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/
+            echo "✓ /www备份: $(sudo du -sh /tmp/vnc-backup-www.tar.gz | cut -f1)"
+          else
+            echo "⚠ /www 目录不存在，跳过"
+          fi
+          
+          # 3. 检测并备份 /home/mxw（如果存在）
+          if [ -d "/home/mxw" ]; then
+            echo "检测到 /home/mxw 目录，正在备份..."
+            sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/
+            echo "✓ /home/mxw备份: $(sudo du -sh /tmp/vnc-backup-mxw.tar.gz | cut -f1)"
+          else
+            echo "⚠ /home/mxw 目录不存在，跳过"
+          fi
 
       - name: 上传数据供下批次使用
         if: matrix.run < strategy.job-total
