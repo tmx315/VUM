@@ -1,47 +1,114 @@
-name: Ubuntu VNC Server
+name: Ubuntu VNC Server (带数据持久化)
 
 on:
   workflow_dispatch:
+    inputs:
+      total_hours:
+        description: '总运行时长（小时）'
+        required: true
+        default: '12'
+        type: choice
+        options:
+          - '6'
+          - '12'
+          - '18'
+          - '24'
 
 jobs:
   ubuntu-vnc:
+    strategy:
+      matrix:
+        run: ${{ fromJson(github.event.inputs.total_hours == '6' && '[1]' || github.event.inputs.total_hours == '12' && '[1,2]' || github.event.inputs.total_hours == '18' && '[1,2,3]' || '[1,2,3,4]') }}
+      fail-fast: false
+      max-parallel: 1  # 关键：确保作业顺序执行，非并行
+    
     runs-on: ubuntu-24.04
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
-      - name: Update APT
-        run: sudo apt-get update
-
-      - name: Prevent service auto-start during apt
-        run: |
-          echo -e '#!/bin/sh\nexit 101' | sudo tee /usr/sbin/policy-rc.d >/dev/null
-          sudo chmod +x /usr/sbin/policy-rc.d
-
-      - name: Checkout repository
+      - name: 检出代码仓库
         uses: actions/checkout@v4
 
-      - name: Disable systemctl hooks
-        run: bash .github/workflows/scripts/disable-systemctl.sh
+      # ==================== 数据恢复步骤 ====================
+      - name: 下载之前保存的数据
+        uses: actions/download-artifact@v4
+        if: matrix.run > 1  # 仅在第2批及以后恢复数据
+        continue-on-error: true  # 首次运行无数据可恢复时不失败
+        with:
+          name: vnc-data-batch-${{ matrix.run - 1 }}
+          path: /tmp/vnc-data-restore
 
-      - name: Pre-create system users and directories
-        run: bash .github/workflows/scripts/precreate-users.sh
+      - name: 恢复VNC配置和用户数据
+        if: matrix.run > 1
+        continue-on-error: true
+        run: |
+          if [ -d "/tmp/vnc-data-restore" ] && [ -f "/tmp/vnc-data-restore/vnc-backup.tar.gz" ]; then
+            echo "发现之前保存的数据，正在恢复..."
+            
+            # 恢复VNC配置
+            tar -xzf /tmp/vnc-data-restore/vnc-backup.tar.gz -C $HOME/
+            
+            # 恢复密码文件（如果存在）
+            if [ -f "$HOME/.vnc/plain-password.txt" ]; then
+              PASS=$(cat "$HOME/.vnc/plain-password.txt")
+              echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
+              echo "✓ 已恢复VNC密码和配置"
+            fi
+            
+            # 恢复用户数据
+            if [ -d "$HOME/persistent-data" ]; then
+              echo "✓ 已恢复用户数据目录: ~/persistent-data"
+              echo "数据恢复完成！"
+            fi
+          else
+            echo "未找到可恢复的数据，将进行全新安装"
+          fi
 
-      - name: Install Desktop and VNC Server
-        run: bash .github/workflows/scripts/install-desktop-vnc.sh
+      # ==================== 全新安装步骤 ====================
+      - name: 系统初始化（仅在第一批或数据恢复失败时）
+        if: matrix.run == 1
+        run: |
+          echo "=== 首次运行，执行完整初始化 ==="
+          
+          # 更新系统
+          sudo apt-get update
+          sudo apt-get upgrade -y
+          
+          # 阻止APT自动启动服务
+          echo -e '#!/bin/sh\nexit 101' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+          sudo chmod +x /usr/sbin/policy-rc.d
+          
+          # 持久化数据目录（您的数据放这里）
+          mkdir -p $HOME/persistent-data
+          echo "重要数据请保存在 ~/persistent-data 目录，会自动保留"
 
-      - name: Validate system users and tmpfiles
-        run: bash .github/workflows/scripts/validate-tmpfiles.sh
+      - name: 安装桌面和VNC（首次运行）
+        if: matrix.run == 1
+        run: |
+          bash .github/workflows/scripts/disable-systemctl.sh
+          bash .github/workflows/scripts/precreate-users.sh
+          bash .github/workflows/scripts/install-desktop-vnc.sh
+          bash .github/workflows/scripts/validate-tmpfiles.sh
+          bash .github/workflows/scripts/reenable-services.sh
 
-      - name: Re-enable service start
-        run: bash .github/workflows/scripts/reenable-services.sh
-
-      - name: Configure VNC Server
+      - name: 配置VNC服务器（首次运行）
+        if: matrix.run == 1
         run: |
           mkdir -p ~/.vnc
+          
+          # 生成强密码
           PASS=$(tr -dc 'A-Za-z0-9!@#$%^&*' </dev/urandom | head -c 16)
           echo "$PASS" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
+          
+          # 明文保存密码（用于后续批次恢复）
+          echo "$PASS" > ~/.vnc/plain-password.txt
+          chmod 600 ~/.vnc/plain-password.txt
+          
+          # 保存到环境变量
           echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
+          
+          # 创建优化的xstartup
           cat > ~/.vnc/xstartup << 'EOF'
           #!/bin/bash
           unset SESSION_MANAGER
@@ -52,40 +119,136 @@ jobs:
           export QT_QPA_PLATFORM=xcb
           exec dbus-launch /usr/bin/gnome-session --session=gnome
           EOF
+          
           chmod +x ~/.vnc/xstartup
+
+      - name: 启动VNC服务器
+        run: |
+          # 清理旧的VNC进程
           vncserver -kill :0 || true
+          sleep 2
+          
+          # 启动VNC
           vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup
+          echo "VNC服务器已启动"
 
-      - name: Install Tailscale
-        run: curl -fsSL https://tailscale.com/install.sh | sh
-
-      - name: Start tailscaled (manual)
+      - name: 安装并配置Tailscale
+        id: tailscale
         run: |
-          sudo mkdir -p /var/run
-          nohup sudo tailscaled >/tmp/tailscaled.log 2>&1 & disown
+          # 如果已安装则跳过
+          if ! command -v tailscale &> /dev/null; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          
+          # 停止可能存在的tailscaled
+          sudo systemctl stop tailscaled 2>/dev/null || true
+          sudo pkill -9 tailscaled || true
+          sleep 2
+          
+          # 手动启动tailscaled
+          sudo mkdir -p /var/run /var/lib/tailscale
+          nohup sudo tailscaled --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            >/tmp/tailscaled.log 2>&1 &
+          sleep 5
+          
+          # 连接到Tailscale
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=gh-runner-${GITHUB_RUN_ID}-run${{ matrix.run }} \
+            --accept-routes
           sleep 3
+          
+          # 获取IP
+          TS_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-      - name: Connect to Tailscale
+      - name: 验证VNC连接
         run: |
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${GITHUB_RUN_ID}
-          echo "TAILSCALE_IP=$(tailscale ip -4)" >> "$GITHUB_ENV"
-
-      - name: Restore systemctl hooks
-        run: bash .github/workflows/scripts/restore-systemctl.sh
-
-      - name: Verify VNC Connection
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "测试连接 $TAILSCALE_IP:5900..."
           nc -z -v "$TAILSCALE_IP" 5900
+          echo "✓ VNC连接正常"
 
-      - name: Keep Connection Alive
+      # ==================== 数据保存步骤 ====================
+      - name: 打包需要持久化的数据
+        id: backup
         run: |
-          echo "=== VNC ACCESS INFORMATION ==="
-          echo "Address: ${TAILSCALE_IP}:5900"
-          echo "Password: ${VNC_PASSWORD}"
-          echo "Desktop: GNOME"
-          echo "=============================="
+          echo "正在打包持久化数据..."
+          
+          # 确保持久化数据目录存在
+          mkdir -p $HOME/persistent-data
+          
+          # 创建备份（包含VNC配置和用户数据）
+          tar -czf /tmp/vnc-backup.tar.gz \
+            -C $HOME/ \
+            .vnc/plain-password.txt \
+            .vnc/passwd \
+            .vnc/xstartup \
+            persistent-data/
+          
+          echo "backup_file=/tmp/vnc-backup.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "✓ 数据打包完成"
+
+      - name: 上传数据到Artifact（供下一批次使用）
+        uses: actions/upload-artifact@v4
+        # 只要不是最后一批，都上传数据给下一批
+        if: matrix.run < strategy.job-total
+        with:
+          name: vnc-data-batch-${{ matrix.run }}
+          path: /tmp/vnc-backup.tar.gz
+          retention-days: 1  # 只保留1天，避免占用空间
+          compression-level: 0  # 已压缩，无需再压缩
+
+      # ==================== 保持连接活跃 ====================
+      - name: 显示访问信息
+        run: |
+          echo "::notice::═══════════════════════════════════════"
+          echo "::notice::  VNC服务器已就绪！"
+          echo "::notice::  运行批次: ${{ matrix.run }} / ${{ strategy.job-total }}"
+          echo "::notice::  Tailscale IP: ${TAILSCALE_IP}:5900"
+          echo "::notice::  密码: ${VNC_PASSWORD}"
+          echo "::notice::  数据目录: ~/persistent-data"
+          echo "::notice::═══════════════════════════════════════"
+
+      - name: 保持连接活跃
+        run: |
+          START_TIME=$(date +%s)
+          END_TIME=$((START_TIME + 360 * 60 - 300))  # 预留5分钟给数据保存
+          
+          echo "========================================"
+          echo "  VNC 持久化会话"
+          echo "========================================"
+          echo "运行批次: ${{ matrix.run }} / ${{ strategy.job-total }}"
+          echo "访问地址: ${TAILSCALE_IP}:5900"
+          echo "访问密码: ${VNC_PASSWORD}"
+          echo "开始时间: $(date -d @$START_TIME '+%Y-%m-%d %H:%M:%S')"
+          echo "结束时间: $(date -d @$END_TIME '+%Y-%m-%d %H:%M:%S')"
+          echo "数据目录: ~/persistent-data/"
+          echo "说明: 此目录中的数据会自动保留到下一批次"
+          echo "========================================"
+          echo ""
+          
           while true; do
-            echo "[$(date)] VNC Active - Cancel workflow to terminate"
+            CURRENT_TIME=$(date +%s)
+            REMAINING=$(( (END_TIME - CURRENT_TIME) / 60 ))
+            
+            if [ $REMAINING -le 0 ]; then
+              echo "[$(date)] 达到时间限制，正在准备保存数据..."
+              break
+            fi
+            
+            echo "[$(date)] VNC运行中，剩余 ${REMAINING} 分钟"
+            
+            # 每小时提醒一次数据保存位置
+            if [ $((CURRENT_TIME % 3600)) -lt 300 ]; then
+              echo "提示: 重要文件请保存在 ~/persistent-data/ 目录"
+            fi
+            
             sleep 300
           done
+
+      - name: 最终清理
+        if: always()
+        run: |
+          echo "正在清理VNC进程..."
+          vncserver -kill :0 || true
+          sudo pkill -9 tailscaled || true
