@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server（终极修复版）
+name: Ubuntu VNC Server（强制解锁版）
 
 on:
   workflow_dispatch:
@@ -32,35 +32,7 @@ jobs:
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
 
-      # ==================== apt锁预清理（关键修复） ====================
-      - name: 等待apt锁释放
-        run: |
-          echo "=== 等待apt锁释放 ==="
-          ATTEMPT=0
-          MAX_ATTEMPTS=30
-          
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            if pgrep -x "apt-get\|apt\|dpkg" > /dev/null; then
-              echo "[尝试 $ATTEMPT/$MAX_ATTEMPTS] apt正在使用，等待10秒..."
-              sleep 10
-              ATTEMPT=$((ATTEMPT + 1))
-            elif [ -f /var/lib/dpkg/lock-frontend ] || [ -f /var/lib/apt/lists/lock ]; then
-              echo "[尝试 $ATTEMPT/$MAX_ATTEMPTS] 存在锁文件，等待10秒..."
-              sleep 10
-              ATTEMPT=$((ATTEMPT + 1))
-            else
-              echo "✓ apt已就绪"
-              exit 0
-            fi
-          done
-          
-          echo "⚠ 等待超时，强制清理..."
-          sudo killall -9 apt-get apt dpkg 2>/dev/null || true
-          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
-          sudo dpkg --configure -a 2>/dev/null || true
-          echo "✓ 已强制修复"
-
-      # ==================== 智能恢复 ====================
+      # ==================== 智能恢复（优先执行） ====================
       - name: 下载并智能恢复数据
         if: matrix.run > 1
         continue-on-error: true
@@ -88,7 +60,7 @@ jobs:
             echo "⚠ 未找到备份数据"
           fi
 
-      # ==================== 第一批：环境初始化 ====================
+      # ==================== 第一批：环境初始化（延迟apt） ====================
       - name: 强制清理Web环境（第一批）
         if: matrix.run == 1
         run: |
@@ -151,8 +123,8 @@ jobs:
           sudo chmod -R 755 /www/server/panel 2>/dev/null || true
           
           cd /www/server/panel
-          sudo python3 tools.py username mxw 2>/dev/null || true  # 忽略错误
-          echo "tmx12531574121" | sudo python3 tools.py password 2>/dev/null || true  # 忽略错误
+          sudo python3 tools.py username mxw 2>/dev/null || true
+          echo "tmx12531574121" | sudo python3 tools.py password 2>/dev/null || true
           
           sudo mkdir -p /www/server/panel/data
           echo "mxw315" | sudo tee /www/server/panel/data/admin_path.pl > /dev/null
@@ -161,33 +133,41 @@ jobs:
           sudo /etc/init.d/bt restart 2>/dev/null || true
           sleep 3
           
-          # 验证配置
-          echo "配置验证："
-          sudo cat /www/server/panel/data/username.pl 2>/dev/null && echo "✓ 用户名已设置" || echo "⚠ 用户名文件不存在"
-          sudo cat /www/server/panel/data/admin_path.pl 2>/dev/null && echo "✓ 入口已设置" || echo "⚠ 入口文件不存在"
-          echo "✓ 密码已设置（加密存储）"
+          echo "✓ 宝塔配置完成"
 
-      # ==================== 设置中文环境 ====================
-      - name: 设置系统为中文环境
+      # ==================== 强制解锁apt（关键：延迟执行） ====================
+      - name: 强制解锁apt并安装中文环境
         run: |
-          echo "=== 设置系统语言为中文 ==="
+          echo "=== 强制解锁apt ==="
           
-          # 等待apt锁（双重保险）
-          ATTEMPT=0
-          while [ $ATTEMPT -lt 10 ] && (pgrep -x "apt-get\|apt" >/dev/null || [ -f /var/lib/dpkg/lock-frontend ]); do
-            echo "[语言设置] 等待apt释放锁..."
-            sleep 5
-            ATTEMPT=$((ATTEMPT + 1))
-          done
+          # 立即强制删除锁文件（不管是否有进程）
+          echo "强制删除所有apt锁文件..."
+          sudo lsof /var/lib/dpkg/lock-frontend 2>/dev/null || echo "无进程占用锁"
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+          sudo killall -9 apt-get apt dpkg 2>/dev/null || true
           
-          # 安装中文语言包
-          sudo apt-get update --fix-missing
-          sudo apt-get install -y language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei
+          # 修复可能损坏的dpkg状态
+          echo "修复dpkg状态..."
+          sudo dpkg --configure -a 2>/dev/null || true
+          
+          # 清理并更新
+          echo "更新apt缓存..."
+          sudo apt-get clean
+          sudo apt-get update --fix-missing --fix-broken
+          
+          # 安装中文环境
+          echo "安装中文语言包..."
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            language-pack-zh-hans \
+            language-pack-zh-hans-base \
+            fonts-noto-cjk \
+            fonts-wqy-zenhei \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold"
           
           # 生成中文locale
           sudo locale-gen zh_CN.UTF-8
           sudo update-locale LANG=zh_CN.UTF-8
-          sudo localectl set-locale LANG=zh_CN.UTF-8 || true
           
           # 设置环境变量
           echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
@@ -197,15 +177,22 @@ jobs:
           export LANGUAGE=zh_CN:zh
           export LC_ALL=zh_CN.UTF-8
           
-          echo "✓ 中文环境设置完成"
+          echo "✓ apt解锁完成，中文环境已安装"
 
-      # ==================== 配置VNC（固定密码） ====================
-      - name: 配置VNC服务器（第一批）
+      - name: 安装桌面和VNC（第一批）
+        if: matrix.run == 1
+        run: |
+          bash .github/workflows/scripts/disable-systemctl.sh
+          bash .github/workflows/scripts/precreate-users.sh
+          bash .github/workflows/scripts/install-desktop-vnc.sh
+          bash .github/workflows/scripts/validate-tmpfiles.sh
+          bash .github/workflows/scripts/reenable-services.sh
+
+      - name: 配置VNC（固定密码）
         if: matrix.run == 1
         run: |
           mkdir -p ~/.vnc
           
-          # 使用固定密码
           PASS="tmx12531574121"
           echo "$PASS" | vncpasswd -f > ~/.vnc/passwd
           echo "$PASS" > ~/.vnc/plain-password.txt
@@ -227,7 +214,7 @@ jobs:
           EOF
           chmod +x ~/.vnc/xstartup
           
-          echo "✓ VNC配置完成，密码: tmx12531574121"
+          echo "✓ VNC配置完成"
 
       - name: 启动VNC服务器
         run: |
@@ -284,9 +271,6 @@ jobs:
           echo "========================================"
           echo "  VNC 持久化会话"
           echo "========================================"
-          echo "地址: ${TAILSCALE_IP}:5900 | 密码: ${VNC_PASSWORD}"
-          echo "时长: 6小时 (预留5分钟保存数据)"
-          echo "========================================"
           
           while true; do
             CURRENT_TIME=$(date +%s)
@@ -307,6 +291,25 @@ jobs:
         run: |
           echo "=== 智能增量备份 ==="
           
+          # 检测并备份 /www
+          if [ -d "/www" ]; then
+            echo "检测到 /www 目录，正在备份..."
+            sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/
+            echo "✓ /www备份: $(sudo du -sh /tmp/vnc-backup-www.tar.gz | cut -f1)"
+          else
+            echo "⚠ /www 不存在，跳过"
+          fi
+          
+          # 检测并备份 /home/mxw
+          if [ -d "/home/mxw" ]; then
+            echo "检测到 /home/mxw 目录，正在备份..."
+            sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/
+            echo "✓ /home/mxw备份: $(sudo du -sh /tmp/vnc-backup-mxw.tar.gz | cut -f1)"
+          else
+            echo "⚠ /home/mxw 不存在，跳过"
+          fi
+          
+          # 备份HOME目录（始终执行）
           cat > /tmp/exclude-list.txt << 'EOF'
           .cache/
           .local/share/Trash/
@@ -318,27 +321,8 @@ jobs:
           .npm/_logs/
           EOF
           
-          # 1. 备份HOME目录
           tar -czf /tmp/vnc-backup.tar.gz --exclude-from=/tmp/exclude-list.txt -C $HOME/ .
           echo "✓ HOME备份: $(du -sh /tmp/vnc-backup.tar.gz | cut -f1)"
-          
-          # 2. 检测并备份 /www（如果存在）
-          if [ -d "/www" ]; then
-            echo "检测到 /www 目录，正在备份..."
-            sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/
-            echo "✓ /www备份: $(sudo du -sh /tmp/vnc-backup-www.tar.gz | cut -f1)"
-          else
-            echo "⚠ /www 目录不存在，跳过"
-          fi
-          
-          # 3. 检测并备份 /home/mxw（如果存在）
-          if [ -d "/home/mxw" ]; then
-            echo "检测到 /home/mxw 目录，正在备份..."
-            sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/
-            echo "✓ /home/mxw备份: $(sudo du -sh /tmp/vnc-backup-mxw.tar.gz | cut -f1)"
-          else
-            echo "⚠ /home/mxw 目录不存在，跳过"
-          fi
 
       - name: 上传数据供下批次使用
         if: matrix.run < strategy.job-total
