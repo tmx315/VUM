@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server（强制解锁版）
+name: Ubuntu VNC Server
 
 on:
   workflow_dispatch:
@@ -60,7 +60,7 @@ jobs:
             echo "⚠ 未找到备份数据"
           fi
 
-      # ==================== 第一批：环境初始化（延迟apt） ====================
+      # ==================== 第一批：环境初始化 ====================
       - name: 强制清理Web环境（第一批）
         if: matrix.run == 1
         run: |
@@ -135,28 +135,34 @@ jobs:
           
           echo "✓ 宝塔配置完成"
 
-      # ==================== 强制解锁apt（关键：延迟执行） ====================
+      # ==================== 强制解锁apt并安装中文环境 ====================
       - name: 强制解锁apt并安装中文环境
         run: |
           echo "=== 强制解锁apt ==="
           
-          # 立即强制删除锁文件（不管是否有进程）
-          echo "强制删除所有apt锁文件..."
-          sudo lsof /var/lib/dpkg/lock-frontend 2>/dev/null || echo "无进程占用锁"
-          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
-          sudo killall -9 apt-get apt dpkg 2>/dev/null || true
+          # 终止所有apt相关进程
+          sudo pkill -9 apt-get || true
+          sudo pkill -9 apt || true
+          sudo pkill -9 dpkg || true
+          sleep 2
           
-          # 修复可能损坏的dpkg状态
-          echo "修复dpkg状态..."
+          # 删除所有锁文件
+          sudo rm -f /var/lib/dpkg/lock-frontend
+          sudo rm -f /var/lib/apt/lists/lock
+          sudo rm -f /var/cache/apt/archives/lock
+          
+          # 修复dpkg状态
           sudo dpkg --configure -a 2>/dev/null || true
           
-          # 清理并更新
-          echo "更新apt缓存..."
-          sudo apt-get clean
-          sudo apt-get update --fix-missing --fix-broken
+          echo "✓ apt已强制解锁"
           
-          # 安装中文环境
-          echo "安装中文语言包..."
+          # 清理并更新
+          echo "正在更新apt缓存..."
+          sudo apt-get clean
+          sudo apt-get update --fix-missing
+          
+          # 安装中文语言包（关键：使用apt-get install，不带update）
+          echo "正在安装中文语言包..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             language-pack-zh-hans \
             language-pack-zh-hans-base \
@@ -166,8 +172,8 @@ jobs:
             -o Dpkg::Options::="--force-confold"
           
           # 生成中文locale
-          sudo locale-gen zh_CN.UTF-8
-          sudo update-locale LANG=zh_CN.UTF-8
+          sudo locale-gen zh_CN.UTF-8 || true
+          sudo update-locale LANG=zh_CN.UTF-8 || true
           
           # 设置环境变量
           echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
@@ -177,7 +183,7 @@ jobs:
           export LANGUAGE=zh_CN:zh
           export LC_ALL=zh_CN.UTF-8
           
-          echo "✓ apt解锁完成，中文环境已安装"
+          echo "✓ 中文环境安装完成"
 
       - name: 安装桌面和VNC（第一批）
         if: matrix.run == 1
@@ -189,7 +195,6 @@ jobs:
           bash .github/workflows/scripts/reenable-services.sh
 
       - name: 配置VNC（固定密码）
-        if: matrix.run == 1
         run: |
           mkdir -p ~/.vnc
           
@@ -214,7 +219,7 @@ jobs:
           EOF
           chmod +x ~/.vnc/xstartup
           
-          echo "✓ VNC配置完成"
+          echo "✓ VNC配置完成，密码: tmx12531574121"
 
       - name: 启动VNC服务器
         run: |
@@ -291,7 +296,9 @@ jobs:
         run: |
           echo "=== 智能增量备份 ==="
           
-          # 检测并备份 /www
+          # 备份顺序：先检测特殊目录，最后备份HOME
+          
+          # 1. 检测并备份 /www
           if [ -d "/www" ]; then
             echo "检测到 /www 目录，正在备份..."
             sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/
@@ -300,7 +307,7 @@ jobs:
             echo "⚠ /www 不存在，跳过"
           fi
           
-          # 检测并备份 /home/mxw
+          # 2. 检测并备份 /home/mxw
           if [ -d "/home/mxw" ]; then
             echo "检测到 /home/mxw 目录，正在备份..."
             sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/
@@ -309,7 +316,7 @@ jobs:
             echo "⚠ /home/mxw 不存在，跳过"
           fi
           
-          # 备份HOME目录（始终执行）
+          # 3. 备份HOME目录（始终执行）
           cat > /tmp/exclude-list.txt << 'EOF'
           .cache/
           .local/share/Trash/
