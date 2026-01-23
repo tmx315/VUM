@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server（极速版）
+name: Ubuntu VNC Server（自动重试版）
 
 on:
   workflow_dispatch:
@@ -39,13 +39,24 @@ jobs:
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
 
-      # ==================== 智能恢复（带快速清理） ====================
+      # ==================== apt锁终极清理（在所有apt操作前执行） ====================
+      - name: 终极apt锁清理（强制）
+        run: |
+          echo "=== 终极apt锁清理（强制）==="
+          for i in {1..10}; do
+            sudo pkill -9 -f "apt|dpkg" 2>/dev/null || true
+            sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+            sudo dpkg --configure -a 2>/dev/null || true
+            [ ! -f /var/lib/dpkg/lock-frontend ] && echo "✓ apt锁清理成功" && break || echo "第$i次清理..."
+            sleep 1
+          done
+
+      # ==================== 智能恢复 ====================
       - name: 下载并智能恢复数据
         if: matrix.run > 1
         continue-on-error: true
         run: |
           echo "=== 从批次 ${{ steps.batch-info.outputs.prev_batch }} 恢复数据 ==="
-          
           curl -L -o /tmp/vnc-backup.tar.gz \
             "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/vnc-data-batch-${{ steps.batch-info.outputs.prev_batch }}" \
             2>/dev/null || true
@@ -53,15 +64,9 @@ jobs:
           if [ -f "/tmp/vnc-backup.tar.gz" ]; then
             echo "✓ 找到备份数据，正在恢复..."
             tar -xzf /tmp/vnc-backup.tar.gz -C $HOME/
-            
             echo "VNC_PASSWORD=tmx12531574121" >> "$GITHUB_ENV"
-            echo "✓ 已设置固定VNC密码"
-            
             [ -f "/tmp/vnc-backup-www.tar.gz" ] && sudo tar -xzf /tmp/vnc-backup-www.tar.gz -C /
             [ -f "/tmp/vnc-backup-mxw.tar.gz" ] && sudo tar -xzf /tmp/vnc-backup-mxw.tar.gz -C /home/
-            
-            sudo chown -R $USER:$USER /www/server/panel/data 2>/dev/null || true
-            sudo chmod -R 755 /www/server/panel 2>/dev/null || true
             echo "✓ 数据恢复完成"
           else
             echo "⚠ 未找到备份数据"
@@ -76,9 +81,6 @@ jobs:
           sudo rm -rf /www /etc/apache2 /etc/nginx /etc/mysql /etc/php*
           sudo apt purge -y apache2* nginx* mysql* php* 2>/dev/null || true
           sudo apt autoremove --purge -y 2>/dev/null || true
-          sudo ss -K dport = 80 2>/dev/null || true
-          sudo ss -K dport = 443 2>/dev/null || true
-          sudo ss -K dport = 3306 2>/dev/null || true
           echo "✅ 清理完成"
 
       - name: 安装 frpc（第一批）
@@ -86,7 +88,6 @@ jobs:
         run: |
           echo "=== 安装 frpc ==="
           [ ! -d "/home/mxw" ] && sudo mkdir -p /home/mxw && sudo chown $USER:$USER /home/mxw
-          
           cd /home/mxw
           if [ ! -f "frpc" ]; then
             wget -O 001.tar.gz https://cf-v1.uapis.cn/download/ChmlFrp-0.51.2_251023_linux_386.tar.gz
@@ -110,11 +111,9 @@ jobs:
           if [ ! -d "/www" ]; then
             wget -O install.sh http://download.bt.cn/install/install_6.0.sh
             echo "y" | sudo bash install.sh || echo "⚠ 安装可能遇到问题"
-            
             sleep 15
             sudo chown -R $USER:$USER /www/server/panel/data 2>/dev/null || true
             sudo chmod -R 755 /www/server/panel 2>/dev/null || true
-            
             [ -d "/www/server/panel" ] && echo "✓ 宝塔安装成功" || echo "⚠ 宝塔未完成安装"
           else
             echo "✓ /www 已存在"
@@ -125,66 +124,66 @@ jobs:
         run: |
           echo "=== 配置宝塔面板 ==="
           [ -d "/www/server/panel" ] || exit 0
-          
           sudo chown -R $USER:$USER /www/server/panel/data 2>/dev/null || true
           sudo chmod -R 755 /www/server/panel 2>/dev/null || true
-          
           cd /www/server/panel
           sudo python3 tools.py username mxw 2>/dev/null || true
           echo "tmx12531574121" | sudo python3 tools.py password 2>/dev/null || true
-          
           sudo mkdir -p /www/server/panel/data
           echo "mxw315" | sudo tee /www/server/panel/data/admin_path.pl > /dev/null
           sudo chmod 600 /www/server/panel/data/admin_path.pl
-          
           sudo /etc/init.d/bt restart 2>/dev/null || true
           sleep 3
-          
           echo "✓ 宝塔配置完成"
 
-      # ==================== 快速清理apt锁（30秒） ====================
-      - name: 快速清理apt锁
-        run: |
-          echo "=== 快速清理apt锁（30秒）==="
-          sudo pkill -9 -f "apt" || true
-          sleep 2
-          sudo rm -f /var/lib/dpkg/lock-frontend
-          sudo dpkg --configure -a 2>/dev/null || true
-          echo "✓ 快速清理完成"
-
-      # ==================== 安装中文语言包（可失败） ====================
-      - name: 安装中文语言包
-        continue-on-error: true  # <--- 关键：即使失败也继续
-        run: |
-          echo "=== 安装中文语言包（非关键步骤）==="
-          sudo apt-get update --fix-missing
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei \
-            -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
-          
-          sudo locale-gen zh_CN.UTF-8 || true
-          sudo update-locale LANG=zh_CN.UTF-8 || true
-          
-          echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
-          echo "LANGUAGE=zh_CN:zh" >> $GITHUB_ENV
-          echo "LC_ALL=zh_CN.UTF-8" >> $GITHUB_ENV
-          export LANG=zh_CN.UTF-8; export LANGUAGE=zh_CN:zh; export LC_ALL=zh_CN.UTF-8
-          
-          echo "✓ 中文环境已配置（或尝试配置）"
-
+      # ==================== 安装桌面和VNC（在apt锁清理后执行） ====================
       - name: 安装桌面和VNC（第一批）
         if: matrix.run == 1
         run: |
           bash .github/workflows/scripts/disable-systemctl.sh
           bash .github/workflows/scripts/precreate-users.sh
-          bash .github/workflows/scripts/install-desktop-vnc.sh
+          bash .github/workflows/scripts/install-desktop-vnc.sh || echo "⚠ 桌面安装可能遇到问题"
           bash .github/workflows/scripts/validate-tmpfiles.sh
           bash .github/workflows/scripts/reenable-services.sh
+
+      # ==================== 自动重试安装中文语言包 ====================
+      - name: 安装中文语言包
+        continue-on-error: true
+        run: |
+          echo "=== 安装中文语言包（自动重试5次）==="
+          for attempt in {1..5}; do
+            echo "第 $attempt 次尝试..."
+            # 尝试前先清理锁
+            sudo pkill -9 -f "apt|dpkg" 2>/dev/null || true
+            sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+            sudo dpkg --configure -a 2>/dev/null || true
+            
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei \
+              -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee /tmp/apt-install.log; then
+              echo "✓ 中文语言包安装成功"
+              break
+            elif [ $attempt -eq 5 ]; then
+              echo "⚠ 经过5次尝试后仍然失败，但继续执行..."
+              break
+            else
+              echo "安装失败，等待10秒后重试..."
+              sleep 10
+            fi
+          done
+          
+          # 设置locale（忽略错误）
+          sudo locale-gen zh_CN.UTF-8 2>/dev/null || true
+          sudo update-locale LANG=zh_CN.UTF-8 2>/dev/null || true
+          
+          echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
+          echo "LANGUAGE=zh_CN:zh" >> $GITHUB_ENV
+          echo "LC_ALL=zh_CN.UTF-8" >> $GITHUB_ENV
+          echo "✓ 中文环境配置完成（可能部分失败）"
 
       - name: 配置VNC（固定密码）
         run: |
           mkdir -p ~/.vnc
-          
           PASS="tmx12531574121"
           echo "$PASS" | vncpasswd -f > ~/.vnc/passwd
           echo "$PASS" > ~/.vnc/plain-password.txt
@@ -205,7 +204,6 @@ jobs:
           exec dbus-launch /usr/bin/gnome-session --session=gnome
           EOF
           chmod +x ~/.vnc/xstartup
-          
           echo "✓ VNC配置完成"
 
       - name: 启动VNC服务器
@@ -257,7 +255,6 @@ jobs:
       - name: 保持连接活跃
         run: |
           touch /tmp/session-start-marker
-          
           START_TIME=${{ steps.session-start.outputs.start_time }}
           CURRENT_TIME=$(date +%s)
           ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
@@ -323,7 +320,7 @@ jobs:
         if: matrix.run < strategy.job-total
         uses: actions/upload-artifact@v4
         with:
-          name: vnc-data-batch-${{ matrix.run }}
+          name: vnc-data-batch-${{ matrix.run }}"
           path: |
             /tmp/vnc-backup.tar.gz
             /tmp/vnc-backup-www.tar.gz
