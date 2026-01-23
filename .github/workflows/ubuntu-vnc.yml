@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server（完整修复版）
+name: Ubuntu VNC Server（终极版）
 
 on:
   workflow_dispatch:
@@ -39,7 +39,7 @@ jobs:
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
 
-      # ==================== apt锁终极清理（仅第一批） ====================
+      # ==================== apt锁终极清理（仅第一批执行） ====================
       - name: 终极apt锁清理（强制）
         if: matrix.run == 1
         run: |
@@ -68,34 +68,16 @@ jobs:
         run: |
           echo "=== 从批次 ${{ steps.batch-info.outputs.prev_batch }} 恢复数据 ==="
           
-          # 检查文件是否存在且有效
           if [ -f "/tmp/vnc-backup.tar.gz" ] && file /tmp/vnc-backup.tar.gz | grep -q "gzip compressed data"; then
             echo "✓ 找到有效备份数据，正在恢复..."
             tar -xzf /tmp/vnc-backup.tar.gz -C $HOME/
-            
             echo "VNC_PASSWORD=tmx12531574121" >> "$GITHUB_ENV"
-            echo "✓ 已设置固定VNC密码"
           else
             echo "⚠ 未找到有效的HOME备份数据"
           fi
           
-          if [ -f "/tmp/vnc-backup-www.tar.gz" ] && file /tmp/vnc-backup-www.tar.gz | grep -q "gzip compressed data"; then
-            sudo tar -xzf /tmp/vnc-backup-www.tar.gz -C /
-            echo "✓ 已恢复 /www 目录"
-          else
-            echo "⚠ 未找到有效的/www备份数据"
-          fi
-          
-          if [ -f "/tmp/vnc-backup-mxw.tar.gz" ] && file /tmp/vnc-backup-mxw.tar.gz | grep -q "gzip compressed data"; then
-            sudo tar -xzf /tmp/vnc-backup-mxw.tar.gz -C /home/
-            echo "✓ 已恢复 /home/mxw 目录"
-          else
-            echo "⚠ 未找到有效的/home/mxw备份数据"
-          fi
-          
-          sudo chown -R $USER:$USER /www/server/panel/data 2>/dev/null || true
-          sudo chmod -R 755 /www/server/panel 2>/dev/null || true
-          echo "✓ 数据恢复完成"
+          [ -f "/tmp/vnc-backup-www.tar.gz" ] && file /tmp/vnc-backup-www.tar.gz | grep -q "gzip" && sudo tar -xzf /tmp/vnc-backup-www.tar.gz -C / && echo "✓ /www已恢复" || echo "⚠ /www恢复失败"
+          [ -f "/tmp/vnc-backup-mxw.tar.gz" ] && file /tmp/vnc-backup-mxw.tar.gz | grep -q "gzip" && sudo tar -xzf /tmp/vnc-backup-mxw.tar.gz -C /home/ && echo "✓ /home/mxw已恢复" || echo "⚠ /home/mxw恢复失败"
 
       # ==================== 第一批：环境初始化 ====================
       - name: 强制清理Web环境（第一批）
@@ -161,7 +143,7 @@ jobs:
           sleep 3
           echo "✓ 宝塔配置完成"
 
-      # ==================== 安装桌面和VNC（必须在配置VNC之前） ====================
+      # ==================== 安装桌面和VNC（第一批） ====================
       - name: 安装桌面和VNC（第一批）
         if: matrix.run == 1
         run: |
@@ -171,50 +153,49 @@ jobs:
           bash .github/workflows/scripts/validate-tmpfiles.sh
           bash .github/workflows/scripts/reenable-services.sh
 
-      # ==================== 安装中文语言包（非关键） ====================
-      - name: 安装中文语言包
-        continue-on-error: true
+      # ==================== 等待apt释放锁（关键：VNC安装后立即执行） ====================
+      - name: 等待apt锁释放
         run: |
-          echo "=== 安装中文语言包（非关键步骤）==="
-          sudo apt-get update --fix-missing
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei \
-            -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee /tmp/apt-install.log || true
-          
-          sudo locale-gen zh_CN.UTF-8 2>/dev/null || true
-          sudo update-locale LANG=zh_CN.UTF-8 2>/dev/null || true
-          
-          echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
-          echo "LANGUAGE=zh_CN:zh" >> $GITHUB_ENV
-          echo "LC_ALL=zh_CN.UTF-8" >> $GITHUB_ENV
-          echo "✓ 中文环境配置完成（可能部分失败）"
+          echo "=== 等待apt锁释放（最多30秒）==="
+          for i in {1..6}; do
+            if [ ! -f /var/lib/dpkg/lock-frontend ] && [ ! -f /var/lib/apt/lists/lock ]; then
+              echo "✓ apt锁已释放" && break
+            fi
+            echo "等待5秒... ($i/6)"
+            sleep 5
+          done
+          sudo pkill -9 -f "apt" 2>/dev/null || true
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+          sudo dpkg --configure -a 2>/dev/null || true
 
-      # ==================== VNC配置（检查vncpasswd是否存在） ====================
+      # ==================== 配置VNC（固定密码） ====================
       - name: 配置VNC（固定密码）
         run: |
           mkdir -p ~/.vnc
           
-          # 检查vncpasswd命令是否存在
+          # 验证vncpasswd命令是否存在
           if ! command -v vncpasswd &> /dev/null; then
-            echo "⚠ vncpasswd 命令不存在，VNC可能未正确安装"
-            echo "尝试重新安装tigervnc-standalone-server..."
-            sudo apt-get update && sudo apt-get install -y tigervnc-standalone-server tigervnc-common
+            echo "⚠ vncpasswd 不存在，尝试重新安装VNC..."
+            sudo pkill -9 -f "apt" 2>/dev/null || true
+            sudo rm -f /var/lib/dpkg/lock-frontend
+            sudo dpkg --configure -a 2>/dev/null || true
+            sudo apt-get update --fix-missing
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tigervnc-standalone-server tigervnc-common \
+              -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+            
+            # 再次检查
+            if ! command -v vncpasswd &> /dev/null; then
+              echo "❌ VNC安装失败，无法继续"
+              exit 1
+            fi
           fi
           
-          # 再次检查
-          if command -v vncpasswd &> /dev/null; then
-            PASS="tmx12531574121"
-            echo "$PASS" | vncpasswd -f > ~/.vnc/passwd
-            echo "$PASS" > ~/.vnc/plain-password.txt
-            chmod 600 ~/.vnc/passwd ~/.vnc/plain-password.txt
-            echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
-            echo "✓ VNC密码配置完成"
-          else
-            echo "⚠ VNC安装失败，无法配置密码"
-            exit 1  # 关键步骤，失败则退出
-          fi
+          PASS="tmx12531574121"
+          echo "$PASS" | vncpasswd -f > ~/.vnc/passwd
+          echo "$PASS" > ~/.vnc/plain-password.txt
+          chmod 600 ~/.vnc/passwd ~/.vnc/plain-password.txt
+          echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
           
-          # 配置启动脚本
           cat > ~/.vnc/xstartup << 'EOF'
           #!/bin/bash
           unset SESSION_MANAGER
@@ -229,6 +210,7 @@ jobs:
           exec dbus-launch /usr/bin/gnome-session --session=gnome
           EOF
           chmod +x ~/.vnc/xstartup
+          echo "✓ VNC配置完成"
 
       - name: 启动VNC服务器
         run: |
