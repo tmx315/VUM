@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server
+name: Ubuntu VNC Server（极速版）
 
 on:
   workflow_dispatch:
@@ -39,58 +39,7 @@ jobs:
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
 
-      # ==================== 第一步：彻底禁用自动更新服务 ====================
-      - name: 彻底禁用自动更新服务
-        run: |
-          echo "=== 禁用Ubuntu自动更新服务 ==="
-          # 多次尝试停止和禁用，因为服务可能自动重启
-          for i in {1..5}; do
-            sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
-            sudo systemctl disable unattended-upgrades.service 2>/dev/null || true
-            sudo systemctl mask unattended-upgrades.service 2>/dev/null || true
-            
-            sudo systemctl stop apt-daily.service 2>/dev/null || true
-            sudo systemctl disable apt-daily.service 2>/dev/null || true
-            sudo systemctl mask apt-daily.service 2>/dev/null || true
-            
-            sudo systemctl stop apt-daily.timer 2>/dev/null || true
-            sudo systemctl disable apt-daily.timer 2>/dev/null || true
-            sudo systemctl mask apt-daily.timer 2>/dev/null || true
-            sleep 2
-          done
-          echo "✓ 自动更新服务已彻底禁用"
-
-      # ==================== 第二步：循环清理apt锁直到成功 ====================
-      - name: 持续清理apt锁直到成功
-        run: |
-          echo "=== 清理apt锁（最多等待5分钟）==="
-          MAX_WAIT=300
-          ELAPSED=0
-          
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            # 终止占用锁的进程
-            if sudo lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
-              PID=$(sudo lsof -t /var/lib/dpkg/lock-frontend 2>/dev/null || echo "")
-              [ -n "$PID" ] && echo "终止进程 $PID..." && sudo kill -9 $PID 2>/dev/null || true
-            fi
-            
-            # 删除锁文件
-            sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
-            
-            # 修复dpkg状态
-            sudo dpkg --configure -a 2>/dev/null || true
-            
-            # 检查是否成功
-            [ ! -f /var/lib/dpkg/lock-frontend ] && echo "✓ apt锁已清理成功" && exit 0
-            
-            echo "等待5秒后重试... (已等待 $ELAPSED 秒)"
-            sleep 5
-            ELAPSED=$((ELAPSED + 5))
-          done
-          
-          echo "⚠ 等待超时，但继续执行..."
-
-      # ==================== 智能恢复 ====================
+      # ==================== 智能恢复（带快速清理） ====================
       - name: 下载并智能恢复数据
         if: matrix.run > 1
         continue-on-error: true
@@ -193,48 +142,35 @@ jobs:
           
           echo "✓ 宝塔配置完成"
 
-      # ==================== 安装中文语言包（带重试机制） ====================
-      - name: 安装中文语言包
+      # ==================== 快速清理apt锁（30秒） ====================
+      - name: 快速清理apt锁
         run: |
-          echo "=== 安装中文语言包（带自动重试）==="
-          
-          # 安装前清理
+          echo "=== 快速清理apt锁（30秒）==="
           sudo pkill -9 -f "apt" || true
           sleep 2
           sudo rm -f /var/lib/dpkg/lock-frontend
           sudo dpkg --configure -a 2>/dev/null || true
+          echo "✓ 快速清理完成"
+
+      # ==================== 安装中文语言包（可失败） ====================
+      - name: 安装中文语言包
+        continue-on-error: true  # <--- 关键：即使失败也继续
+        run: |
+          echo "=== 安装中文语言包（非关键步骤）==="
+          sudo apt-get update --fix-missing
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei \
+            -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
           
-          # 循环重试安装（最多5次）
-          for attempt in {1..5}; do
-            echo "第 $attempt 次尝试安装..."
-            
-            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-               language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei \
-               -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"; then
-              echo "✓ 中文语言包安装成功"
-              break
-            else
-              echo "第 $attempt 次安装失败"
-              if [ $attempt -lt 5 ]; then
-                echo "等待10秒后重试..."
-                sleep 10
-                sudo pkill -9 -f "apt" || true
-                sudo rm -f /var/lib/dpkg/lock-frontend
-              else
-                echo "⚠ 安装失败，但继续执行..."
-              fi
-            fi
-          done
-          
-          # 设置locale（忽略错误）
-          sudo locale-gen zh_CN.UTF-8 2>/dev/null || true
-          sudo update-locale LANG=zh_CN.UTF-8 2>/dev/null || true
+          sudo locale-gen zh_CN.UTF-8 || true
+          sudo update-locale LANG=zh_CN.UTF-8 || true
           
           echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
           echo "LANGUAGE=zh_CN:zh" >> $GITHUB_ENV
           echo "LC_ALL=zh_CN.UTF-8" >> $GITHUB_ENV
+          export LANG=zh_CN.UTF-8; export LANGUAGE=zh_CN:zh; export LC_ALL=zh_CN.UTF-8
           
-          echo "✓ 中文环境配置完成"
+          echo "✓ 中文环境已配置（或尝试配置）"
 
       - name: 安装桌面和VNC（第一批）
         if: matrix.run == 1
@@ -322,19 +258,17 @@ jobs:
         run: |
           touch /tmp/session-start-marker
           
-          # 计算已经消耗的时间
           START_TIME=${{ steps.session-start.outputs.start_time }}
           CURRENT_TIME=$(date +%s)
           ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
           
           echo "========================================"
-          echo "  VNC 持久化会话 - 全程计时模式"
+          echo "  VNC 持久化会话 - 全程计时"
           echo "========================================"
           echo "工作流开始时间: $(date -d @$START_TIME)"
           echo "前期步骤耗时: ${ELAPSED} 分钟"
           echo "========================================"
           
-          # 6小时 = 360分钟，减去已耗时和预留5分钟
           END_TIME=$((START_TIME + 360 * 60))
           RESERVED_END_TIME=$((END_TIME - 300))
           
@@ -357,25 +291,20 @@ jobs:
         run: |
           echo "=== 智能增量备份 ==="
           
-          # 检测并备份 /www
           if [ -d "/www" ]; then
-            echo "检测到 /www 目录，正在备份..."
             sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/
             echo "✓ /www备份: $(sudo du -sh /tmp/vnc-backup-www.tar.gz | cut -f1)"
           else
             echo "⚠ /www 不存在，跳过"
           fi
           
-          # 检测并备份 /home/mxw
           if [ -d "/home/mxw" ]; then
-            echo "检测到 /home/mxw 目录，正在备份..."
             sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/
             echo "✓ /home/mxw备份: $(sudo du -sh /tmp/vnc-backup-mxw.tar.gz | cut -f1)"
           else
             echo "⚠ /home/mxw 不存在，跳过"
           fi
           
-          # 备份HOME目录
           cat > /tmp/exclude-list.txt << 'EOF'
           .cache/
           .local/share/Trash/
