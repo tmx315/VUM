@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server（禁用自动更新服务）
+name: Ubuntu VNC Server
 
 on:
   workflow_dispatch:
@@ -19,11 +19,21 @@ jobs:
       max-parallel: 1
 
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 400  # 增加总超时，给前期步骤留时间
 
     steps:
       - name: 检出代码仓库
         uses: actions/checkout@v4
+
+      # ==================== 记录开始时间（从最开始计时） ====================
+      - name: 记录会话开始时间
+        run: |
+          echo "=== 记录会话开始时间 ==="
+          START_TIME=$(date +%s)
+          echo "start_time=$START_TIME" >> "$GITHUB_OUTPUT"
+          echo "会话开始时间: $(date -d @$START_TIME)"
+          echo "所有前期步骤的耗时都将计入总时长"
+        id: session-start
 
       - name: 计算批次信息
         id: batch-info
@@ -31,34 +41,6 @@ jobs:
           PREV_BATCH=$(( ${{ matrix.run }} - 1 ))
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
-
-      # ==================== 第一步：禁用自动更新服务（关键） ====================
-      - name: 禁用自动更新服务
-        run: |
-          echo "=== 禁用Ubuntu自动更新服务 ==="
-          sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
-          sudo systemctl disable unattended-upgrades.service 2>/dev/null || true
-          sudo systemctl mask unattended-upgrades.service 2>/dev/null || true
-          
-          sudo systemctl stop apt-daily.service 2>/dev/null || true
-          sudo systemctl disable apt-daily.service 2>/dev/null || true
-          sudo systemctl mask apt-daily.service 2>/dev/null || true
-          
-          sudo systemctl stop apt-daily.timer 2>/dev/null || true
-          sudo systemctl disable apt-daily.timer 2>/dev/null || true
-          sudo systemctl mask apt-daily.timer 2>/dev/null || true
-          
-          echo "✓ 自动更新服务已禁用"
-
-      # ==================== 第二步：强制清理apt锁 ====================
-      - name: 强制清理apt锁
-        run: |
-          echo "=== 强制清理所有apt锁 ==="
-          sudo pkill -9 -f "apt" || true
-          sleep 2
-          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
-          sudo dpkg --configure -a 2>/dev/null || true
-          echo "✓ apt锁已清理"
 
       # ==================== 智能恢复（第三批及以后） ====================
       - name: 下载并智能恢复数据
@@ -163,38 +145,21 @@ jobs:
           
           echo "✓ 宝塔配置完成"
 
-      # ==================== 安装中文语言包（需要apt） ====================
       - name: 安装中文语言包
         run: |
           echo "=== 安装中文语言包 ==="
-          
-          # 再次清理锁（宝塔安装可能触发了apt）
-          sudo pkill -9 -f "apt" || true
-          sleep 1
-          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
-          sudo dpkg --configure -a 2>/dev/null || true
-          
-          # 更新并安装
           sudo apt-get update --fix-missing
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            language-pack-zh-hans \
-            language-pack-zh-hans-base \
-            fonts-noto-cjk \
-            fonts-wqy-zenhei \
-            -o Dpkg::Options::="--force-confdef" \
-            -o Dpkg::Options::="--force-confold"
+            language-pack-zh-hans language-pack-zh-hans-base fonts-noto-cjk fonts-wqy-zenhei \
+            -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
           
-          # 生成locale
           sudo locale-gen zh_CN.UTF-8 || true
           sudo update-locale LANG=zh_CN.UTF-8 || true
           
-          # 设置环境变量
           echo "LANG=zh_CN.UTF-8" >> $GITHUB_ENV
           echo "LANGUAGE=zh_CN:zh" >> $GITHUB_ENV
           echo "LC_ALL=zh_CN.UTF-8" >> $GITHUB_ENV
-          export LANG=zh_CN.UTF-8
-          export LANGUAGE=zh_CN:zh
-          export LC_ALL=zh_CN.UTF-8
+          export LANG=zh_CN.UTF-8; export LANGUAGE=zh_CN:zh; export LC_ALL=zh_CN.UTF-8
           
           echo "✓ 中文环境已安装"
 
@@ -279,20 +244,30 @@ jobs:
           echo "::notice::  宝塔面板：mxw / tmx12531574121 / ${TAILSCALE_IP}:8888/mxw315"
           echo "::notice::═══════════════════════════════════════"
 
-      # ==================== 会话保持 ====================
+      # ==================== 会话保持（使用全局开始时间） ====================
       - name: 保持连接活跃
         run: |
           touch /tmp/session-start-marker
-          START_TIME=$(date +%s)
-          END_TIME=$((START_TIME + 360 * 60 - 300))
+          
+          # 使用工作流最开始记录的时间
+          START_TIME=${{ steps.session-start.outputs.start_time }}
+          CURRENT_TIME=$(date +%s)
+          ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
           
           echo "========================================"
-          echo "  VNC 持久化会话"
+          echo "  VNC 持久化会话 - 全程计时模式"
           echo "========================================"
+          echo "工作流开始时间: $(date -d @$START_TIME)"
+          echo "前期步骤耗时: ${ELAPSED} 分钟"
+          echo "========================================"
+          
+          # 6小时 = 360分钟，减去前期耗时，再预留5分钟
+          END_TIME=$((START_TIME + 360 * 60))
+          RESERVED_END_TIME=$((END_TIME - 300))
           
           while true; do
             CURRENT_TIME=$(date +%s)
-            REMAINING=$(( (END_TIME - CURRENT_TIME) / 60 ))
+            REMAINING=$(( (RESERVED_END_TIME - CURRENT_TIME) / 60 ))
             
             if [ $REMAINING -le 0 ]; then
               echo "[$(date)] 时间到，准备保存数据..."
@@ -303,7 +278,7 @@ jobs:
             sleep 300
           done
 
-      # ==================== 智能数据保存（带目录检测） ====================
+      # ==================== 智能数据保存 ====================
       - name: 智能增量备份
         if: matrix.run < strategy.job-total
         run: |
@@ -327,7 +302,7 @@ jobs:
             echo "⚠ /home/mxw 不存在，跳过"
           fi
           
-          # 备份HOME目录（始终执行）
+          # 备份HOME目录
           cat > /tmp/exclude-list.txt << 'EOF'
           .cache/
           .local/share/Trash/
@@ -346,7 +321,7 @@ jobs:
         if: matrix.run < strategy.job-total
         uses: actions/upload-artifact@v4
         with:
-          name: vnc-data-batch-${{ matrix.run }}
+          name: vnc-data-batch-${{ matrix.run }}"
           path: |
             /tmp/vnc-backup.tar.gz
             /tmp/vnc-backup-www.tar.gz
