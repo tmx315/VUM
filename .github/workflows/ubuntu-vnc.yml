@@ -1,4 +1,4 @@
-name: Ubuntu VNC Server
+name: Ubuntu VNC Server（禁用自动更新服务）
 
 on:
   workflow_dispatch:
@@ -32,7 +32,35 @@ jobs:
           echo "prev_batch=$PREV_BATCH" >> "$GITHUB_OUTPUT"
           echo "total_batches=${{ strategy.job-total }}" >> "$GITHUB_OUTPUT"
 
-      # ==================== 智能恢复（优先执行） ====================
+      # ==================== 第一步：禁用自动更新服务（关键） ====================
+      - name: 禁用自动更新服务
+        run: |
+          echo "=== 禁用Ubuntu自动更新服务 ==="
+          sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
+          sudo systemctl disable unattended-upgrades.service 2>/dev/null || true
+          sudo systemctl mask unattended-upgrades.service 2>/dev/null || true
+          
+          sudo systemctl stop apt-daily.service 2>/dev/null || true
+          sudo systemctl disable apt-daily.service 2>/dev/null || true
+          sudo systemctl mask apt-daily.service 2>/dev/null || true
+          
+          sudo systemctl stop apt-daily.timer 2>/dev/null || true
+          sudo systemctl disable apt-daily.timer 2>/dev/null || true
+          sudo systemctl mask apt-daily.timer 2>/dev/null || true
+          
+          echo "✓ 自动更新服务已禁用"
+
+      # ==================== 第二步：强制清理apt锁 ====================
+      - name: 强制清理apt锁
+        run: |
+          echo "=== 强制清理所有apt锁 ==="
+          sudo pkill -9 -f "apt" || true
+          sleep 2
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+          sudo dpkg --configure -a 2>/dev/null || true
+          echo "✓ apt锁已清理"
+
+      # ==================== 智能恢复（第三批及以后） ====================
       - name: 下载并智能恢复数据
         if: matrix.run > 1
         continue-on-error: true
@@ -135,34 +163,19 @@ jobs:
           
           echo "✓ 宝塔配置完成"
 
-      # ==================== 强制解锁apt并安装中文环境 ====================
-      - name: 强制解锁apt并安装中文环境
+      # ==================== 安装中文语言包（需要apt） ====================
+      - name: 安装中文语言包
         run: |
-          echo "=== 强制解锁apt ==="
+          echo "=== 安装中文语言包 ==="
           
-          # 终止所有apt相关进程
-          sudo pkill -9 apt-get || true
-          sudo pkill -9 apt || true
-          sudo pkill -9 dpkg || true
-          sleep 2
-          
-          # 删除所有锁文件
-          sudo rm -f /var/lib/dpkg/lock-frontend
-          sudo rm -f /var/lib/apt/lists/lock
-          sudo rm -f /var/cache/apt/archives/lock
-          
-          # 修复dpkg状态
+          # 再次清理锁（宝塔安装可能触发了apt）
+          sudo pkill -9 -f "apt" || true
+          sleep 1
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
           sudo dpkg --configure -a 2>/dev/null || true
           
-          echo "✓ apt已强制解锁"
-          
-          # 清理并更新
-          echo "正在更新apt缓存..."
-          sudo apt-get clean
+          # 更新并安装
           sudo apt-get update --fix-missing
-          
-          # 安装中文语言包（关键：使用apt-get install，不带update）
-          echo "正在安装中文语言包..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             language-pack-zh-hans \
             language-pack-zh-hans-base \
@@ -171,7 +184,7 @@ jobs:
             -o Dpkg::Options::="--force-confdef" \
             -o Dpkg::Options::="--force-confold"
           
-          # 生成中文locale
+          # 生成locale
           sudo locale-gen zh_CN.UTF-8 || true
           sudo update-locale LANG=zh_CN.UTF-8 || true
           
@@ -183,7 +196,7 @@ jobs:
           export LANGUAGE=zh_CN:zh
           export LC_ALL=zh_CN.UTF-8
           
-          echo "✓ 中文环境安装完成"
+          echo "✓ 中文环境已安装"
 
       - name: 安装桌面和VNC（第一批）
         if: matrix.run == 1
@@ -219,7 +232,7 @@ jobs:
           EOF
           chmod +x ~/.vnc/xstartup
           
-          echo "✓ VNC配置完成，密码: tmx12531574121"
+          echo "✓ VNC配置完成"
 
       - name: 启动VNC服务器
         run: |
@@ -296,9 +309,7 @@ jobs:
         run: |
           echo "=== 智能增量备份 ==="
           
-          # 备份顺序：先检测特殊目录，最后备份HOME
-          
-          # 1. 检测并备份 /www
+          # 检测并备份 /www
           if [ -d "/www" ]; then
             echo "检测到 /www 目录，正在备份..."
             sudo tar -czf /tmp/vnc-backup-www.tar.gz -C / www/
@@ -307,7 +318,7 @@ jobs:
             echo "⚠ /www 不存在，跳过"
           fi
           
-          # 2. 检测并备份 /home/mxw
+          # 检测并备份 /home/mxw
           if [ -d "/home/mxw" ]; then
             echo "检测到 /home/mxw 目录，正在备份..."
             sudo tar -czf /tmp/vnc-backup-mxw.tar.gz -C /home mxw/
@@ -316,7 +327,7 @@ jobs:
             echo "⚠ /home/mxw 不存在，跳过"
           fi
           
-          # 3. 备份HOME目录（始终执行）
+          # 备份HOME目录（始终执行）
           cat > /tmp/exclude-list.txt << 'EOF'
           .cache/
           .local/share/Trash/
