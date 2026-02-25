@@ -23,19 +23,45 @@ jobs:
           RDP_USERNAME: mxw
           RDP_PASSWORD: "@Tmx12531574121"
         run: |
-          # 直接在工作流中创建用户，替代外部脚本调用
-          $username = $env:RDP_USERNAME
-          $password = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          # 强制使用 UTF-8 编码，避免字符解析问题
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           
-          # 检查用户是否已存在，不存在则创建
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $username -Password $password -FullName "RDP User" -Description "Temporary RDP User" -PasswordNeverExpires $true
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-              Add-LocalGroupMember -Group "Administrators" -Member $username
-              Write-Host "User $username created successfully with admin privileges"
+          # 定义用户信息
+          $username = $env:RDP_USERNAME.Trim()
+          $plainPassword = $env:RDP_PASSWORD.Trim()
+          
+          # 安全转换密码（修复关键：使用强类型转换）
+          $password = ConvertTo-SecureString -String $plainPassword -AsPlainText -Force
+          
+          # 检查用户是否已存在
+          $userExists = $false
+          try {
+              Get-LocalUser -Name $username -ErrorAction Stop
+              $userExists = $true
+          } catch {
+              $userExists = $false
+          }
+          
+          if (-not $userExists) {
+              # 修复关键：显式指定所有参数名，避免位置参数错误
+              New-LocalUser `
+                  -Name $username `
+                  -Password $password `
+                  -FullName "RDP User" `
+                  -Description "Temporary RDP User" `
+                  -PasswordNeverExpires:$true `
+                  -ErrorAction Stop
+              
+              # 添加远程桌面和管理员权限
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+              Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+              
+              Write-Host "✅ User $username created successfully with admin and RDP privileges"
           } else {
-              Write-Host "User $username already exists, updating password and permissions"
-              Set-LocalUser -Name $username -Password $password -PasswordNeverExpires $true
+              Write-Host "ℹ️ User $username already exists, updating password"
+              Set-LocalUser -Name $username -Password $password -PasswordNeverExpires:$true -ErrorAction Stop
+              
+              # 确保权限配置正确
               if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue)) {
                   Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
               }
@@ -61,14 +87,13 @@ jobs:
       - name: Maintain Connection
         shell: pwsh
         env:
-          # 传递用户名和密码到输出步骤
           RDP_USERNAME: mxw
           RDP_PASSWORD: "@Tmx12531574121"
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USERNAME"  # 使用新的用户名环境变量
-          Write-Host "Password: $env:RDP_PASSWORD"  # 显示新密码
+          Write-Host "Username: $env:RDP_USERNAME"
+          Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==================`n"
           while ($true) {
             Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
