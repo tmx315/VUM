@@ -18,7 +18,31 @@ jobs:
 
       - name: Create RDP User with Secure Password
         shell: pwsh
-        run: .github/workflows/scripts/win-create-user.ps1
+        env:
+          # 定义新的用户名和密码环境变量
+          RDP_USERNAME: mxw
+          RDP_PASSWORD: "@Tmx12531574121"
+        run: |
+          # 直接在工作流中创建用户，替代外部脚本调用
+          $username = $env:RDP_USERNAME
+          $password = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          
+          # 检查用户是否已存在，不存在则创建
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $username -Password $password -FullName "RDP User" -Description "Temporary RDP User" -PasswordNeverExpires $true
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+              Add-LocalGroupMember -Group "Administrators" -Member $username
+              Write-Host "User $username created successfully with admin privileges"
+          } else {
+              Write-Host "User $username already exists, updating password and permissions"
+              Set-LocalUser -Name $username -Password $password -PasswordNeverExpires $true
+              if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue)) {
+                  Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+              }
+              if (-not (Get-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue)) {
+                  Add-LocalGroupMember -Group "Administrators" -Member $username
+              }
+          }
 
       - name: Install Tailscale
         shell: pwsh
@@ -36,11 +60,15 @@ jobs:
 
       - name: Maintain Connection
         shell: pwsh
+        env:
+          # 传递用户名和密码到输出步骤
+          RDP_USERNAME: mxw
+          RDP_PASSWORD: "@Tmx12531574121"
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: vum"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "Username: $env:RDP_USERNAME"  # 使用新的用户名环境变量
+          Write-Host "Password: $env:RDP_PASSWORD"  # 显示新密码
           Write-Host "==================`n"
           while ($true) {
             Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
