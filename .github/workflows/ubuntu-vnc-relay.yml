@@ -80,6 +80,9 @@ jobs:
 
       - name: Keep Connection Alive and Backup at 5 Hours
         run: |
+          # Set timezone to UTC to avoid confusion
+          export TZ=UTC
+          
           echo "=== VNC ACCESS INFORMATION ==="
           echo "Address: ${TAILSCALE_IP}:5900"
           echo "Password: ${VNC_PASSWORD}"
@@ -90,22 +93,27 @@ jobs:
           backup_time=$((start_time + 5 * 60 * 60))
           end_time=$((start_time + 6 * 60 * 60))
           
+          echo "[$(date)] Workflow started at $(date -d @$start_time)"
+          echo "[$(date)] Backup scheduled at $(date -d @$backup_time)"
+          echo "[$(date)] Workflow will end at $(date -d @$end_time)"
+          
+          # Create backup directory early to avoid issues later
+          backup_dir="/tmp/vnc-backup-${GITHUB_RUN_ID}"
+          mkdir -p "$backup_dir"
+          
           while true; do
             current_time=$(date +%s)
+            remaining=$((backup_time - current_time))
             
-            if [ $current_time -ge $backup_time ] && [ $current_time -lt $end_time ]; then
+            if [ $remaining -le 0 ] && [ $current_time -lt $end_time ]; then
               echo "[$(date)] Starting backup process..."
-              
-              # Create backup directory
-              backup_dir="/tmp/vnc-backup-${GITHUB_RUN_ID}"
-              mkdir -p "$backup_dir"
               
               # Backup important files and directories
               echo "Backing up home directory..."
-              tar -czf "$backup_dir/home-backup.tar.gz" ~/ --exclude="~/Downloads" --exclude="~/tmp"
+              tar -czf "$backup_dir/home-backup.tar.gz" ~/ --exclude="~/Downloads" --exclude="~/tmp" || echo "[$(date)] Warning: Home backup failed"
               
               echo "Backing up VNC configuration..."
-              cp -r ~/.vnc "$backup_dir/"
+              cp -r ~/.vnc "$backup_dir/" || echo "[$(date)] Warning: VNC config backup failed"
               
               echo "Backing up system configuration..."
               sudo cp -r /etc/vnc* "$backup_dir/" 2>/dev/null || true
@@ -118,7 +126,7 @@ jobs:
               echo "[$(date)] Workflow time limit reached"
               exit 0
             else
-              echo "[$(date)] VNC Active - Will backup at 5 hours"
+              echo "[$(date)] VNC Active - Will backup in $((remaining / 60)) minutes"
               sleep 300
             fi
           done
