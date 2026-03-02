@@ -107,6 +107,7 @@ jobs:
           start_time=$(date +%s)
           backup_time=$((start_time + 5 * 60 * 60))
           end_time=$((start_time + 6 * 60 * 60))
+          last_minute_backup=0
           
           echo "[$(date)] Workflow started at $(date -d @$start_time)"
           echo "[$(date)] Backup scheduled at $(date -d @$backup_time)"
@@ -116,22 +117,56 @@ jobs:
           backup_dir="/tmp/vnc-backup-${GITHUB_RUN_ID}"
           mkdir -p "$backup_dir"
           
+          # Create directory for 10-minute backups
+          minute_backup_dir="/tmp/vnc-minute-backups-${GITHUB_RUN_ID}"
+          mkdir -p "$minute_backup_dir"
+          
+          # Function to handle cleanup
+          cleanup() {
+            echo "[$(date)] Cleaning up..."
+            vncserver -kill :0 || true
+            sudo pkill -f tailscaled || true
+          }
+          
+          # Function to perform 10-minute backup
+          perform_minute_backup() {
+            local backup_time=$(date +%Y%m%d_%H%M%S)
+            local backup_file="$minute_backup_dir/backup_${backup_time}.tar.gz"
+            echo "[$(date)] Performing 10-minute backup..."
+            tar -czf "$backup_file" ~/.vnc ~/Documents ~/Desktop --exclude="~/Downloads" --exclude="~/tmp" --exclude="~/node_modules" || echo "[$(date)] Warning: 10-minute backup failed"
+            echo "[$(date)] 10-minute backup completed: $backup_file"
+          }
+          
+          # Trap SIGTERM and SIGINT
+          trap cleanup SIGTERM SIGINT
+          
           while true; do
             current_time=$(date +%s)
             remaining=$((backup_time - current_time))
+            current_minute=$((current_time / 60 % 10))
+            
+            # Perform 10-minute backup
+            if [ $current_minute -eq 0 ] && [ $last_minute_backup -ne $((current_time / 60 / 10)) ]; then
+              perform_minute_backup
+              last_minute_backup=$((current_time / 60 / 10))
+            fi
             
             if [ $remaining -le 0 ] && [ $current_time -lt $end_time ]; then
-              echo "[$(date)] Starting backup process..."
+              echo "[$(date)] Starting 5-hour backup process..."
               
               # Backup important files and directories
               echo "Backing up home directory..."
-              tar -czf "$backup_dir/home-backup.tar.gz" ~/ --exclude="~/Downloads" --exclude="~/tmp" || echo "[$(date)] Warning: Home backup failed"
+              tar -czf "$backup_dir/home-backup.tar.gz" ~/ --exclude="~/Downloads" --exclude="~/tmp" --exclude="~/node_modules" || echo "[$(date)] Warning: Home backup failed"
               
               echo "Backing up VNC configuration..."
               cp -r ~/.vnc "$backup_dir/" || echo "[$(date)] Warning: VNC config backup failed"
               
               echo "Backing up system configuration..."
               sudo cp -r /etc/vnc* "$backup_dir/" 2>/dev/null || true
+              
+              # Copy 10-minute backups to main backup directory
+              echo "Copying 10-minute backups to main backup..."
+              cp -r "$minute_backup_dir" "$backup_dir/"
               
               # Upload backup as artifact
               echo "Uploading backup artifact..."
@@ -142,9 +177,15 @@ jobs:
               exit 0
             else
               echo "[$(date)] VNC Active - Will backup in $((remaining / 60)) minutes"
-              sleep 300
+              # Check if VNC server is still running
+              vncserver -list | grep :0 || echo "[$(date)] Warning: VNC server not running"
+              # Check if Tailscale is still connected
+              tailscale status | grep -E 'Active|Connected' || echo "[$(date)] Warning: Tailscale not connected"
+              sleep 60
             fi
           done
+          
+          echo "[$(date)] Backup process completed successfully"
 
       - name: Upload Backup Artifact
         uses: actions/upload-artifact@v4
