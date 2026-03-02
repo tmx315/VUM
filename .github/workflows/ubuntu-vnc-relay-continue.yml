@@ -1,0 +1,154 @@
+name: Ubuntu VNC Server Relay Continue
+
+on:
+  repository_dispatch:
+    types: [vnc-relay]
+
+jobs:
+  ubuntu-vnc-relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Update APT
+        run: sudo apt-get update
+
+      - name: Prevent service auto-start during apt
+        run: |
+          echo -e '#!/bin/sh\nexit 101' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+          sudo chmod +x /usr/sbin/policy-rc.d
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Disable systemctl hooks
+        run: bash .github/workflows/scripts/disable-systemctl.sh
+
+      - name: Pre-create system users and directories
+        run: bash .github/workflows/scripts/precreate-users.sh
+
+      - name: Install Desktop and VNC Server
+        run: bash .github/workflows/scripts/install-desktop-vnc.sh
+
+      - name: Validate system users and tmpfiles
+        run: bash .github/workflows/scripts/validate-tmpfiles.sh
+
+      - name: Re-enable service start
+        run: bash .github/workflows/scripts/reenable-services.sh
+
+      - name: Download Backup Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.client_payload.backup_artifact }}
+          path: /tmp/backup
+
+      - name: Restore Backup
+        run: |
+          echo "Restoring backup..."
+          
+          # Restore home directory
+          if [ -f /tmp/backup/home-backup.tar.gz ]; then
+            echo "Restoring home directory..."
+            tar -xzf /tmp/backup/home-backup.tar.gz -C /
+          fi
+          
+          # Restore VNC configuration
+          if [ -d /tmp/backup/.vnc ]; then
+            echo "Restoring VNC configuration..."
+            cp -r /tmp/backup/.vnc ~/
+            chmod 600 ~/.vnc/passwd
+            chmod +x ~/.vnc/xstartup
+          fi
+          
+          # Restore system configuration
+          if [ -d /tmp/backup/etc ]; then
+            echo "Restoring system configuration..."
+            sudo cp -r /tmp/backup/etc/* /etc/ 2>/dev/null || true
+          fi
+
+      - name: Start VNC Server
+        run: |
+          vncserver -kill :0 || true
+          vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup
+
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Start tailscaled (manual)
+        run: |
+          sudo mkdir -p /var/run
+          nohup sudo tailscaled >/tmp/tailscaled.log 2>&1 & disown
+          sleep 3
+
+      - name: Connect to Tailscale
+        run: |
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${GITHUB_RUN_ID}
+          echo "TAILSCALE_IP=$(tailscale ip -4)" >> "$GITHUB_ENV"
+
+      - name: Restore systemctl hooks
+        run: bash .github/workflows/scripts/restore-systemctl.sh
+
+      - name: Verify VNC Connection
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+          nc -z -v "$TAILSCALE_IP" 5900
+
+      - name: Keep Connection Alive and Backup at 5 Hours
+        run: |
+          echo "=== VNC ACCESS INFORMATION ==="
+          echo "Address: ${TAILSCALE_IP}:5900"
+          echo "Password: (Restored from backup)"
+          echo "Desktop: GNOME"
+          echo "=============================="
+          
+          start_time=$(date +%s)
+          backup_time=$((start_time + 5 * 60 * 60))
+          end_time=$((start_time + 6 * 60 * 60))
+          
+          while true; do
+            current_time=$(date +%s)
+            
+            if [ $current_time -ge $backup_time ] && [ $current_time -lt $end_time ]; then
+              echo "[$(date)] Starting backup process..."
+              
+              # Create backup directory
+              backup_dir="/tmp/vnc-backup-${GITHUB_RUN_ID}"
+              mkdir -p "$backup_dir"
+              
+              # Backup important files and directories
+              echo "Backing up home directory..."
+              tar -czf "$backup_dir/home-backup.tar.gz" ~/ --exclude="~/Downloads" --exclude="~/tmp"
+              
+              echo "Backing up VNC configuration..."
+              cp -r ~/.vnc "$backup_dir/"
+              
+              echo "Backing up system configuration..."
+              sudo cp -r /etc/vnc* "$backup_dir/" 2>/dev/null || true
+              
+              # Upload backup as artifact
+              echo "Uploading backup artifact..."
+              echo "BACKUP_DIR=$backup_dir" >> "$GITHUB_ENV"
+              break
+            elif [ $current_time -ge $end_time ]; then
+              echo "[$(date)] Workflow time limit reached"
+              exit 0
+            else
+              echo "[$(date)] VNC Active - Will backup at 5 hours"
+              sleep 300
+            fi
+          done
+
+      - name: Upload Backup Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnc-backup-${{ github.run_id }}
+          path: ${{ env.BACKUP_DIR }}
+          retention-days: 1
+
+      - name: Trigger Next Relay Workflow
+        run: |
+          echo "Triggering next relay workflow..."
+          curl -X POST https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -d '{"event_type": "vnc-relay", "client_payload": {"backup_artifact": "vnc-backup-${{ github.run_id }}"}}'
