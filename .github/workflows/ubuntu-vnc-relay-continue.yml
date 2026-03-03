@@ -133,8 +133,9 @@ jobs:
           perform_15min_backup() {
             local backup_time=$(date +%Y%m%d_%H%M%S)
             local backup_file="$minute_backup_dir/backup_${backup_time}.tar.gz"
+            local home_dir="$(pwd)"
             echo "[$(date)] Performing 15-minute backup..."
-            tar -czf "$backup_file" --exclude="Downloads" --exclude="tmp" --exclude="node_modules" ~/.vnc ~/Documents ~/Desktop || echo "[$(date)] Warning: 15-minute backup failed"
+            tar -czf "$backup_file" --exclude="Downloads" --exclude="tmp" --exclude="node_modules" "$home_dir/.vnc" "$home_dir/Documents" "$home_dir/Desktop" || echo "[$(date)] Warning: 15-minute backup failed"
             echo "[$(date)] 15-minute backup completed: $backup_file"
           }
           
@@ -157,7 +158,8 @@ jobs:
               
               # Backup important files and directories
               echo "Backing up home directory..."
-              tar -czf "$backup_dir/home-backup.tar.gz" --exclude="Downloads" --exclude="tmp" --exclude="node_modules" ~/ || echo "[$(date)] Warning: Home backup failed"
+              local home_dir="$(pwd)"
+              tar -czf "$backup_dir/home-backup.tar.gz" --exclude="Downloads" --exclude="tmp" --exclude="node_modules" "$home_dir" || echo "[$(date)] Warning: Home backup failed"
               
               echo "Backing up VNC configuration..."
               cp -r ~/.vnc "$backup_dir/" || echo "[$(date)] Warning: VNC config backup failed"
