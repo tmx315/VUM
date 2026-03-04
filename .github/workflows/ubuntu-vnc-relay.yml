@@ -90,22 +90,17 @@ jobs:
           echo "=============================="
           
           start_time=$(date +%s)
-          backup_time=$((start_time + 5 * 60 * 60))
-          end_time=$((start_time + 6 * 60 * 60))
-          last_minute_backup=$((start_time / 60 / 5))
+          backup_time=$((start_time + 5 * 60 * 60))  # 5 hours before end
+          end_time=$((start_time + 6 * 60 * 60))  # 6 hours total
           
           echo "[$(date)] Workflow started at $(date -d @$start_time)"
           echo "[$(date)] 5-hour backup scheduled at $(date -d @$backup_time)"
           echo "[$(date)] Workflow will end at $(date -d @$end_time)"
-          echo "[$(date)] 5-minute backups will run every 5 minutes"
+          echo "[$(date)] Full backup will run at 5 hours"
           
           # Create backup directory early to avoid issues later
           backup_dir="/tmp/vnc-backup-${GITHUB_RUN_ID}"
           mkdir -p "$backup_dir"
-          
-          # Create directory for 5-minute backups
-          minute_backup_dir="/tmp/vnc-5min-backups-${GITHUB_RUN_ID}"
-          mkdir -p "$minute_backup_dir"
           
           # Function to handle cleanup
           cleanup() {
@@ -114,36 +109,23 @@ jobs:
             sudo pkill -f tailscaled || true
           }
           
-          # Function to perform 5-minute backup
-          perform_5min_backup() {
-            local backup_time=$(date +%Y%m%d_%H%M%S)
-            local backup_file="$minute_backup_dir/backup_${backup_time}.tar.gz"
-            local home_dir="$(pwd)"
-            echo "[$(date)] Performing 5-minute backup..."
-            tar -czf "$backup_file" --exclude="Downloads" --exclude="tmp" --exclude="node_modules" "$home_dir/.vnc" "$home_dir/Documents" "$home_dir/Desktop" || echo "[$(date)] Warning: 5-minute backup failed"
-            echo "[$(date)] 5-minute backup completed: $backup_file"
-          }
-          
           # Trap SIGTERM and SIGINT
           trap cleanup SIGTERM SIGINT
           
           while true; do
             current_time=$(date +%s)
             remaining=$((backup_time - current_time))
-            current_minute=$((current_time / 60 % 5))
-            
-            # Perform 5-minute backup
-            if [ $current_minute -eq 0 ] && [ $last_minute_backup -ne $((current_time / 60 / 5)) ]; then
-              perform_5min_backup
-              last_minute_backup=$((current_time / 60 / 5))
-            fi
             
             if [ $remaining -le 0 ] && [ $current_time -lt $end_time ]; then
               echo "[$(date)] Starting 5-hour backup process..."
               
               # Backup important files and directories
               echo "Backing up home directory..."
-              local home_dir="$(pwd)"
+              local home_dir="$HOME"
+              echo "[$(date)] Home directory: $home_dir"
+              # Create necessary directories if they don't exist
+              mkdir -p "$home_dir/.vnc" "$home_dir/Documents" "$home_dir/Desktop"
+              # Full backup of all files
               tar -czf "$backup_dir/home-backup.tar.gz" --exclude="Downloads" --exclude="tmp" --exclude="node_modules" "$home_dir" || echo "[$(date)] Warning: Home backup failed"
               
               echo "Backing up VNC configuration..."
@@ -152,23 +134,69 @@ jobs:
               echo "Backing up system configuration..."
               sudo cp -r /etc/vnc* "$backup_dir/" 2>/dev/null || true
               
-              # Copy 5-minute backups to main backup directory
-              echo "Copying 5-minute backups to main backup..."
-              cp -r "$minute_backup_dir" "$backup_dir/"
-              
               # Upload backup as artifact
               echo "Uploading backup artifact..."
               echo "BACKUP_DIR=$backup_dir" >> "$GITHUB_ENV"
               break
             elif [ $current_time -ge $end_time ]; then
-              echo "[$(date)] Workflow time limit reached"
+              echo "[$(date)] Workflow time limit reached, performing final backup..."
+              # Final backup as fallback
+              local home_dir="$HOME"
+              mkdir -p "$backup_dir"
+              echo "Backing up home directory..."
+              # Full backup of all files
+              tar -czf "$backup_dir/home-backup.tar.gz" --exclude="Downloads" --exclude="tmp" --exclude="node_modules" "$home_dir" || echo "[$(date)] Warning: Home backup failed"
+              echo "Backing up VNC configuration..."
+              cp -r ~/.vnc "$backup_dir/" || echo "[$(date)] Warning: VNC config backup failed"
+              echo "Uploading backup artifact..."
+              echo "BACKUP_DIR=$backup_dir" >> "$GITHUB_ENV"
               exit 0
             else
               echo "[$(date)] VNC Active - 5-hour backup in $((remaining / 60)) minutes"
               # Check if VNC server is still running
-              vncserver -list | grep :0 || echo "[$(date)] Warning: VNC server not running"
+              vnc_list=$(vncserver -list 2>&1)
+              if echo "$vnc_list" | grep -E ':0\s*\('; then
+                echo "[$(date)] VNC server is running"
+              else
+                echo "[$(date)] Warning: VNC server not running, restarting..."
+                vncserver -kill :0 || true
+                sleep 2
+                output=$(vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup 2>&1)
+                if echo "$output" | grep -E 'New Xtigervnc server|Xvnc server|already running'; then
+                  echo "[$(date)] VNC server restarted successfully"
+                else
+                  echo "[$(date)] Error: Failed to restart VNC server"
+                fi
+              fi
               # Check if Tailscale is still connected
-              tailscale status | grep -E 'Active|Connected' || echo "[$(date)] Warning: Tailscale not connected"
+              tailscale_status=$(tailscale status 2>&1)
+              ip_check=$(tailscale ip -4 2>&1)
+              if echo "$tailscale_status" | grep -E 'Active|Connected|State.*active' || [ -n "$ip_check" ] && ! echo "$ip_check" | grep -E 'error|not found'; then
+                echo "[$(date)] Tailscale is connected"
+                if [ -n "$ip_check" ] && ! echo "$ip_check" | grep -E 'error|not found'; then
+                  echo "TAILSCALE_IP=$ip_check" >> "$GITHUB_ENV"
+                  echo "[$(date)] Tailscale IP: $ip_check"
+                fi
+              else
+                echo "[$(date)] Warning: Tailscale not connected, restarting..."
+                sudo pkill -f tailscaled || true
+                sleep 2
+                nohup sudo tailscaled >/tmp/tailscaled.log 2>&1 & disown
+                sleep 3
+                sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${GITHUB_RUN_ID}
+                sleep 2
+                tailscale_status=$(tailscale status 2>&1)
+                ip_check=$(tailscale ip -4 2>&1)
+                if echo "$tailscale_status" | grep -E 'Active|Connected|State.*active' || [ -n "$ip_check" ] && ! echo "$ip_check" | grep -E 'error|not found'; then
+                  echo "[$(date)] Tailscale reconnected successfully"
+                  if [ -n "$ip_check" ] && ! echo "$ip_check" | grep -E 'error|not found'; then
+                    echo "TAILSCALE_IP=$ip_check" >> "$GITHUB_ENV"
+                    echo "[$(date)] Tailscale IP updated: $ip_check"
+                  fi
+                else
+                  echo "[$(date)] Error: Failed to reconnect Tailscale"
+                fi
+              fi
               sleep 60
             fi
           done
