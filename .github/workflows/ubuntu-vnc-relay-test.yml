@@ -54,7 +54,17 @@ jobs:
           EOF
           chmod +x ~/.vnc/xstartup
           vncserver -kill :0 || true
-          vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup
+          # Retry VNC server start
+          for i in {1..3}; do
+            echo "Attempt $i to start VNC server..."
+            vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup
+            if vncserver -list | grep :0; then
+              echo "VNC server started successfully"
+              break
+            fi
+            echo "VNC server start failed, retrying in 5 seconds..."
+            sleep 5
+          done
 
       - name: Install Tailscale
         run: curl -fsSL https://tailscale.com/install.sh | sh
@@ -62,13 +72,45 @@ jobs:
       - name: Start tailscaled (manual)
         run: |
           sudo mkdir -p /var/run
+          # Kill any existing tailscaled processes
+          sudo pkill -f tailscaled || true
+          sleep 2
           nohup sudo tailscaled >/tmp/tailscaled.log 2>&1 & disown
+          # Wait for tailscaled to start
+          for i in {1..5}; do
+            if sudo tailscaled --socket=/var/run/tailscale/tailscaled.sock status >/dev/null 2>&1; then
+              echo "tailscaled started successfully"
+              break
+            fi
+            echo "Waiting for tailscaled to start..."
+            sleep 2
+          done
           sleep 3
 
       - name: Connect to Tailscale
         run: |
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${GITHUB_RUN_ID}
-          echo "TAILSCALE_IP=$(tailscale ip -4)" >> "$GITHUB_ENV"
+          # Retry Tailscale connection
+          for i in {1..3}; do
+            echo "Attempt $i to connect to Tailscale..."
+            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${GITHUB_RUN_ID}
+            if tailscale status | grep -E 'Active|Connected'; then
+              echo "Tailscale connected successfully"
+              break
+            fi
+            echo "Tailscale connection failed, retrying in 5 seconds..."
+            sleep 5
+          done
+          # Get Tailscale IP
+          for i in {1..5}; do
+            IP=$(tailscale ip -4)
+            if [ -n "$IP" ]; then
+              echo "TAILSCALE_IP=$IP" >> "$GITHUB_ENV"
+              echo "Tailscale IP obtained: $IP"
+              break
+            fi
+            echo "Waiting for Tailscale IP..."
+            sleep 2
+          done
 
       - name: Restore systemctl hooks
         run: bash .github/workflows/scripts/restore-systemctl.sh
@@ -166,9 +208,31 @@ jobs:
             else
               echo "[$(date)] VNC Active - 5-hour backup in $((remaining / 60)) minutes"
               # Check if VNC server is still running
-              vncserver -list | grep :0 || echo "[$(date)] Warning: VNC server not running"
+              if ! vncserver -list | grep :0; then
+                echo "[$(date)] Warning: VNC server not running, restarting..."
+                vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup
+                if vncserver -list | grep :0; then
+                  echo "[$(date)] VNC server restarted successfully"
+                else
+                  echo "[$(date)] Error: Failed to restart VNC server"
+                fi
+              fi
               # Check if Tailscale is still connected
-              tailscale status | grep -E 'Active|Connected' || echo "[$(date)] Warning: Tailscale not connected"
+              if ! tailscale status | grep -E 'Active|Connected'; then
+                echo "[$(date)] Warning: Tailscale not connected, restarting..."
+                sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${GITHUB_RUN_ID}
+                if tailscale status | grep -E 'Active|Connected'; then
+                  echo "[$(date)] Tailscale reconnected successfully"
+                  # Update Tailscale IP
+                  IP=$(tailscale ip -4)
+                  if [ -n "$IP" ]; then
+                    echo "TAILSCALE_IP=$IP" >> "$GITHUB_ENV"
+                    echo "[$(date)] Tailscale IP updated: $IP"
+                  fi
+                else
+                  echo "[$(date)] Error: Failed to reconnect Tailscale"
+                fi
+              fi
               sleep 60
             fi
           done
