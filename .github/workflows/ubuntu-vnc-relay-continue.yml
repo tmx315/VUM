@@ -98,11 +98,17 @@ jobs:
           # Set timezone to UTC to avoid confusion
           export TZ=UTC
           
+          # Get VNC password from backup file
+          VNC_PASS=""
+          if [ -f "~/.vnc/password.txt" ]; then
+            VNC_PASS=$(cat "~/.vnc/password.txt")
+          fi
+          
           echo "=== VNC ACCESS INFORMATION ==="
           echo "Address: ${TAILSCALE_IP}:5900"
-          echo "Password: (Restored from backup)"
+          echo "Password: ${VNC_PASS:-Restored from backup}"
           echo "Desktop: GNOME"
-          echo "=============================="
+          echo "==============================="
           
           start_time=$(date +%s)
           backup_time=$((start_time + 5 * 60 * 60))  # 5 hours before end
@@ -169,12 +175,15 @@ jobs:
             else
               echo "[$(date)] VNC Active - 5-hour backup in $((remaining / 60)) minutes"
               # Check if VNC server is still running
-              vnc_list=$(vncserver -list 2>&1)
-              if echo "$vnc_list" | grep -E ':0\s*\('; then
+              # More reliable check using ps and netstat
+              if ps aux | grep -E 'Xtigervnc|Xvnc' | grep -v grep | grep -E ':0'; then
                 echo "[$(date)] VNC server is running"
+              elif netstat -tuln | grep -E '5900'; then
+                echo "[$(date)] VNC server is running on port 5900"
               else
                 echo "[$(date)] Warning: VNC server not running, restarting..."
-                vncserver -kill :0 || true
+                # Only kill if process exists
+                vncserver -kill :0 2>/dev/null || true
                 sleep 2
                 output=$(vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup 2>&1)
                 if echo "$output" | grep -E 'New Xtigervnc server|Xvnc server|already running'; then

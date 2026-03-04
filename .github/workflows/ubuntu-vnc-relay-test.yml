@@ -38,10 +38,15 @@ jobs:
       - name: Configure VNC Server
         run: |
           mkdir -p ~/.vnc
+          # Generate VNC password
           PASS=$(tr -dc 'A-Za-z0-9!@#$%^&*' </dev/urandom | head -c 16)
           echo "$PASS" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
+          # Store password in environment variable
           echo "VNC_PASSWORD=$PASS" >> "$GITHUB_ENV"
+          # Also store in a file for backup
+          echo "$PASS" > ~/.vnc/password.txt
+          chmod 600 ~/.vnc/password.txt
           cat > ~/.vnc/xstartup << 'EOF'
           #!/bin/bash
           unset SESSION_MANAGER
@@ -53,12 +58,11 @@ jobs:
           exec dbus-launch /usr/bin/gnome-session --session=gnome
           EOF
           chmod +x ~/.vnc/xstartup
-          vncserver -kill :0 || true
           # Retry VNC server start
           for i in {1..3}; do
             echo "Attempt $i to start VNC server..."
             # Kill any existing VNC server on :0
-            vncserver -kill :0 || true
+            vncserver -kill :0 2>/dev/null || true
             sleep 2
             # Start VNC server
             output=$(vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup 2>&1)
@@ -134,11 +138,17 @@ jobs:
           # Set timezone to UTC to avoid confusion
           export TZ=UTC
           
+          # Get VNC password from environment variable or file
+          VNC_PASS="${VNC_PASSWORD}"
+          if [ -z "$VNC_PASS" ] && [ -f "~/.vnc/password.txt" ]; then
+            VNC_PASS=$(cat "~/.vnc/password.txt")
+          fi
+          
           echo "=== VNC ACCESS INFORMATION ==="
           echo "Address: ${TAILSCALE_IP}:5900"
-          echo "Password: ${VNC_PASSWORD}"
+          echo "Password: ${VNC_PASS}"
           echo "Desktop: GNOME"
-          echo "=============================="
+          echo "==============================="
           
           start_time=$(date +%s)
           backup_time=$((start_time + 5 * 60))  # 5 minutes
@@ -223,13 +233,15 @@ jobs:
             else
               echo "[$(date)] VNC Active - 5-minute backup in $((remaining / 60)) minutes"
               # Check if VNC server is still running
-              vnc_list=$(vncserver -list 2>&1)
-              if echo "$vnc_list" | grep -E ':0\s*\('; then
+              # More reliable check using ps and netstat
+              if ps aux | grep -E 'Xtigervnc|Xvnc' | grep -v grep | grep -E ':0'; then
                 echo "[$(date)] VNC server is running"
+              elif netstat -tuln | grep -E '5900'; then
+                echo "[$(date)] VNC server is running on port 5900"
               else
                 echo "[$(date)] Warning: VNC server not running, restarting..."
-                # Kill any existing VNC server on :0
-                vncserver -kill :0 || true
+                # Only kill if process exists
+                vncserver -kill :0 2>/dev/null || true
                 sleep 2
                 # Start VNC server
                 output=$(vncserver :0 -localhost no -geometry 1280x800 -depth 24 -xstartup ~/.vnc/xstartup 2>&1)
