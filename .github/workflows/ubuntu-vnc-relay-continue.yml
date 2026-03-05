@@ -142,7 +142,7 @@ jobs:
               
               # Backup important files and directories
               echo "Backing up home directory..."
-              local home_dir="$HOME"
+              home_dir="$HOME"
               echo "[$(date)] Home directory: $home_dir"
               # Create necessary directories if they don't exist
               mkdir -p "$home_dir/.vnc" "$home_dir/Documents" "$home_dir/Desktop"
@@ -162,7 +162,7 @@ jobs:
             elif [ $current_time -ge $end_time ]; then
               echo "[$(date)] Workflow time limit reached, performing final backup..."
               # Final backup as fallback
-              local home_dir="$HOME"
+              home_dir="$HOME"
               mkdir -p "$backup_dir"
               echo "Backing up home directory..."
               # Full backup of all files

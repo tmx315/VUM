@@ -103,9 +103,12 @@ jobs:
           echo "Desktop: GNOME"
           echo "==============================="
           
+          # Get current time at the start of the step
           start_time=$(date +%s)
-          backup_time=$((start_time + 5 * 60 * 60))  # 5 hours before end
-          end_time=$((start_time + 6 * 60 * 60))  # 6 hours total
+          # Calculate backup time (5 hours from now)
+          backup_time=$((start_time + 5 * 60 * 60))
+          # Calculate end time (6 hours from now)
+          end_time=$((start_time + 6 * 60 * 60))
           
           echo "[$(date)] Workflow started at $(date -d @$start_time)"
           echo "[$(date)] 5-hour backup scheduled at $(date -d @$backup_time)"
@@ -135,7 +138,7 @@ jobs:
               
               # Backup important files and directories
               echo "Backing up home directory..."
-              local home_dir="$HOME"
+              home_dir="$HOME"
               echo "[$(date)] Home directory: $home_dir"
               # Create necessary directories if they don't exist
               mkdir -p "$home_dir/.vnc" "$home_dir/Documents" "$home_dir/Desktop"
@@ -155,7 +158,7 @@ jobs:
             elif [ $current_time -ge $end_time ]; then
               echo "[$(date)] Workflow time limit reached, performing final backup..."
               # Final backup as fallback
-              local home_dir="$HOME"
+              home_dir="$HOME"
               mkdir -p "$backup_dir"
               echo "Backing up home directory..."
               # Full backup of all files

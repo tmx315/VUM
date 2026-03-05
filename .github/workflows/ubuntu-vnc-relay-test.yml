@@ -207,7 +207,7 @@ jobs:
               
               # Backup important files and directories
               echo "Backing up home directory..."
-              local home_dir="$HOME"
+              home_dir="$HOME"
               echo "[$(date)] Home directory: $home_dir"
               # Create necessary directories if they don't exist
               mkdir -p "$home_dir/.vnc" "$home_dir/Documents" "$home_dir/Desktop"
