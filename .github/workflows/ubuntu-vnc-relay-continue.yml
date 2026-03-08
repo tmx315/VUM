@@ -6,9 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       backup_artifact:
-        description: 'Name of the backup artifact to restore'
-        required: true
+        description: 'Name of the backup artifact to restore (if not using URL)'
+        required: false
         default: 'vnc-backup-0'
+      backup_url:
+        description: 'Direct URL to the backup artifact (if using URL)'
+        required: false
+        default: ''
 
 jobs:
   ubuntu-vnc-relay:
@@ -43,9 +47,28 @@ jobs:
         run: bash .github/workflows/scripts/reenable-services.sh
 
       - name: Download Backup Artifact
+        run: |
+          # Create backup directory
+          mkdir -p /tmp/backup
+          
+          # Check if backup URL is provided
+          if [ -n "${{ github.event.inputs.backup_url }}" ]; then
+            echo "Downloading backup from URL: ${{ github.event.inputs.backup_url }}"
+            # Extract artifact name from URL if needed
+            curl -L -o /tmp/backup/artifact.zip "${{ github.event.inputs.backup_url }}"
+            unzip /tmp/backup/artifact.zip -d /tmp/backup
+          else
+            echo "Downloading backup artifact: ${{ github.event.inputs.backup_artifact || github.event.client_payload.backup_artifact }}"
+            # Use actions/download-artifact
+            echo "::set-output name=artifact_name::${{ github.event.inputs.backup_artifact || github.event.client_payload.backup_artifact }}"
+          fi
+        id: download
+
+      - name: Download Artifact (if not using URL)
+        if: steps.download.outputs.artifact_name != ''
         uses: actions/download-artifact@v4
         with:
-          name: ${{ github.event.inputs.backup_artifact || github.event.client_payload.backup_artifact }}
+          name: ${{ steps.download.outputs.artifact_name }}
           path: /tmp/backup
 
       - name: Restore Backup
