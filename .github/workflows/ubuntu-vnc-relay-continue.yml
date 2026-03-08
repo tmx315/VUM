@@ -3,6 +3,12 @@ name: Ubuntu VNC Server Relay Continue
 on:
   repository_dispatch:
     types: [vnc-relay]
+  workflow_dispatch:
+    inputs:
+      backup_artifact:
+        description: 'Name of the backup artifact to restore'
+        required: true
+        default: 'vnc-backup-0'
 
 jobs:
   ubuntu-vnc-relay:
@@ -39,7 +45,7 @@ jobs:
       - name: Download Backup Artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ github.event.client_payload.backup_artifact }}
+          name: ${{ github.event.inputs.backup_artifact || github.event.client_payload.backup_artifact }}
           path: /tmp/backup
 
       - name: Restore Backup
